@@ -1691,7 +1691,8 @@ class _EntryGateState extends State<EntryGate> {
   Future<void> _auto() async {
     try {
       final String last = prefs.getString('tmc_last_user') ?? '';
-      if (last.isNotEmpty && LocalDb.exists(last)) {
+      if (last == kOfflineLocalUser ||
+          (last.isNotEmpty && LocalDb.exists(last))) {
         await Store.load(last);
         if (!mounted) return;
         setState(() {
@@ -1751,6 +1752,8 @@ class SplashScreen extends StatelessWidget {
   }
 }
 
+const String kOfflineLocalUser = '__tmc_offline_local__';
+
 // ============================== LOGIN ================================
 class LoginScreen extends StatefulWidget {
   final Future<void> Function(String user) onDone;
@@ -1788,7 +1791,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
   void _refresh() {
     if (!mounted) return;
-    setState(() => _contas = LocalDb.names());
+    setState(() => _contas = LocalDb.names().where((String u) => u != kOfflineLocalUser).toList());
   }
 
   Future<void> _submit() async {
@@ -1822,6 +1825,26 @@ class _LoginScreenState extends State<LoginScreen> {
     await Store.load(u);
     await widget.onDone(u);
     if (mounted) setState(() => _busy = false);
+  }
+
+  Future<void> _continueOffline() async {
+    if (_busy) return;
+    FocusScope.of(context).unfocus();
+    setState(() {
+      _busy = true;
+      _err = '';
+    });
+    try {
+      await Store.load(kOfflineLocalUser);
+      await widget.onDone(kOfflineLocalUser);
+    } catch (_) {
+      if (mounted) {
+        setState(() => _err =
+            'Nao foi possivel abrir o modo offline. Tente novamente.');
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
   }
 
   Future<void> _esqueci() async {
@@ -2100,6 +2123,34 @@ class _LoginScreenState extends State<LoginScreen> {
                         ],
                       ),
                     ),
+                  ),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Prefere nao criar conta?',
+                    style: TextStyle(
+                        color: Colors.white70,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 6),
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      onPressed: _busy ? null : _continueOffline,
+                      icon: const Icon(Icons.phone_android),
+                      label: const Text('CONTINUAR SEM CONTA'),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: kGold,
+                        side: const BorderSide(color: kGold),
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  const Text(
+                    'Favoritos e historico ficam salvos localmente neste aparelho.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: Colors.white38, fontSize: 11),
                   ),
                   if (_contas.isNotEmpty) ...<Widget>[
                     const SizedBox(height: 16),
