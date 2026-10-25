@@ -1,16 +1,26 @@
 // =====================================================================
-//  TMC  -  Agregador de Streaming   (build 2.1 - "YouCine Edition")
-//  Catalogo TMDB + Resolvedores BR + Player HLS + Resume + Favoritos
+//  TMC  -  AGREGADOR DE STREAMING                build 3.0  "TMC ULTRA"
+//  ------------------------------------------------------------------
+//  * Contas locais (usuario + senha) com backup em arquivo JSON
+//  * Favoritos e Historico: remover item a item e limpar tudo
+//  * Limpeza automatica de cache (imagens + player + webview)
+//  * Web sem AssertionError, arrasto com o mouse, abas e scroll infinito
+//  * Player HLS com qualidade AUTOMATICA, resume e fallback de servidores
+//  Alvos: Flutter Web / Android Mobile / Android TV (TV Box)
 //  >>>>> COLE A SUA CHAVE DO TMDB NA LINHA MARCADA ABAIXO <<<<<
 // =====================================================================
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
+import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:video_player/video_player.dart';
 import 'package:webview_flutter/webview_flutter.dart';
@@ -18,10 +28,10 @@ import 'package:webview_flutter/webview_flutter.dart';
 // ======================= CONFIGURACAO ================================
 String tmdbApiKey = "SUA_CHAVE_AQUI";
 
-const String kTmdbBase = "https://api.themoviedb.org/3";
-const String kTmdbImg = "https://image.tmdb.org/t/p";
+const String kTmdbBase = 'https://api.themoviedb.org/3';
+const String kTmdbImg = 'https://image.tmdb.org/t/p';
 const String kUserAgent =
-    "Mozilla/5.0 (Linux; Android 11; Android TV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+    'Mozilla/5.0 (Linux; Android 11; Android TV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
 const Color kBg = Color(0xFF070A12);
 const Color kSurface = Color(0xFF121826);
@@ -29,6 +39,7 @@ const Color kCard = Color(0xFF1A2233);
 const Color kAccent = Color(0xFF3D7BFF);
 const Color kGold = Color(0xFFF5C451);
 const Color kRed = Color(0xFFE5484D);
+const Color kGreen = Color(0xFF35C46A);
 
 const int kGenreSoap = 10766;
 const int kGenreDrama = 18;
@@ -37,51 +48,229 @@ const int kGenreAnimation = 16;
 
 late SharedPreferences prefs;
 
+// ============================== MAIN =================================
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  SystemChrome.setPreferredOrientations(const <DeviceOrientation>[
-    DeviceOrientation.portraitUp,
-    DeviceOrientation.landscapeLeft,
-    DeviceOrientation.landscapeRight,
-  ]);
+  try {
+    await SystemChrome.setPreferredOrientations(const <DeviceOrientation>[
+      DeviceOrientation.portraitUp,
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]);
+  } catch (_) {}
   prefs = await SharedPreferences.getInstance();
+  CacheKeeper.install();
+  await LocalDb.init();
   runApp(const TmcApp());
 }
 
-class TmcApp extends StatelessWidget {
-  const TmcApp({super.key});
+// ========================= LIMPEZA DE CACHE ==========================
+class CacheKeeper {
+  static Timer? _timer;
 
-  @override
-  Widget build(BuildContext context) {
-    final ThemeData base = ThemeData.dark(useMaterial3: true);
-    // Correcao de tipos do GoogleFonts: usamos apenas o fontFamily e
-    // aplicamos no TextTheme do proprio tema (evita conflito de tipos).
-    final String? font = GoogleFonts.poppins().fontFamily;
+  static void install() {
+    final ImageCache c = PaintingBinding.instance.imageCache;
+    c.maximumSize = 140;
+    c.maximumSizeBytes = 64 << 20;
+    _timer?.cancel();
+    _timer = Timer.periodic(const Duration(seconds: 75), (Timer _) {
+      PaintingBinding.instance.imageCache.clearLiveImages();
+    });
+  }
 
-    return MaterialApp(
-      title: 'TMC',
-      debugShowCheckedModeBanner: false,
-      theme: base.copyWith(
-        scaffoldBackgroundColor: kBg,
-        colorScheme: base.colorScheme.copyWith(
-          primary: kAccent,
-          secondary: kGold,
-          surface: kSurface,
-        ),
-        textTheme: base.textTheme.apply(
-          fontFamily: font,
-          bodyColor: Colors.white,
-          displayColor: Colors.white,
-        ),
-        appBarTheme: const AppBarTheme(backgroundColor: kBg, elevation: 0),
-        snackBarTheme: const SnackBarThemeData(
-          backgroundColor: kCard,
-          contentTextStyle: TextStyle(color: Colors.white),
-          behavior: SnackBarBehavior.floating,
-        ),
-      ),
-      home: const RootShell(),
-    );
+  /// Descarte total: usado quando um video/webview e fechado.
+  static void wipe() {
+    final ImageCache c = PaintingBinding.instance.imageCache;
+    c.clear();
+    c.clearLiveImages();
+  }
+
+  static Future<void> trim() async {
+    PaintingBinding.instance.imageCache.clearLiveImages();
+    await Future<void>.delayed(const Duration(milliseconds: 40));
+  }
+}
+
+// ===================== BANCO LOCAL EM ARQUIVO =======================
+class LocalDb {
+  static final Map<String, dynamic> root = <String, dynamic>{
+    'app': 'TMC',
+    'version': 2,
+    'updated': '',
+    'users': <String, dynamic>{},
+  };
+
+  static final List<File> _files = <File>[];
+  static String location = 'memoria interna';
+
+  static bool get _android {
+    if (kIsWeb) return false;
+    try {
+      return Platform.isAndroid;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static Map<String, dynamic> get users =>
+      (root['users'] as Map<String, dynamic>?) ?? <String, dynamic>{};
+
+  static List<String> names() {
+    final List<String> l = users.keys.toList();
+    l.sort();
+    return l;
+  }
+
+  static bool exists(String u) => users.containsKey(u.trim());
+
+  static Map<String, dynamic>? user(String u) {
+    final dynamic m = users[u.trim()];
+    if (m is Map) return m.cast<String, dynamic>();
+    return null;
+  }
+
+  static String hashOf(String u) => (user(u)?['hash'] ?? '').toString();
+
+  static Future<void> addUser(String u, String hash) async {
+    users[u.trim()] = <String, dynamic>{
+      'hash': hash,
+      'created': DateTime.now().toIso8601String(),
+      'favs': <dynamic>[],
+      'prog': <dynamic>[],
+    };
+    await save();
+  }
+
+  static Future<void> setUserData(String u, Map<String, dynamic> data) async {
+    final Map<String, dynamic> m = user(u) ?? <String, dynamic>{};
+    m['hash'] = (m['hash'] ?? '').toString();
+    m['favs'] = data['favs'];
+    m['prog'] = data['prog'];
+    users[u.trim()] = m;
+  }
+
+  static Future<void> init() async {
+    _files.clear();
+    if (kIsWeb) {
+      location = 'navegador (armazenamento local)';
+      await _restoreMirror();
+      return;
+    }
+    final List<String> dirs = <String>[];
+    try {
+      final Directory? ext = await getExternalStorageDirectory();
+      if (ext != null) dirs.add('${ext.path}${Platform.pathSeparator}TMC');
+    } catch (_) {}
+    if (_android) dirs.add('/storage/emulated/0/Download/TMC');
+    try {
+      final Directory doc = await getApplicationDocumentsDirectory();
+      dirs.add('${doc.path}${Platform.pathSeparator}TMC');
+    } catch (_) {}
+    for (final String d in dirs) {
+      try {
+        final Directory dir = Directory(d);
+        if (!dir.existsSync()) dir.createSync(recursive: true);
+        _files.add(File('$d${Platform.pathSeparator}tmc_backup.json'));
+      } catch (_) {}
+    }
+    location = dirs.isEmpty ? 'memoria interna' : dirs.first;
+    await _load();
+    if (users.isEmpty) await _restoreMirror();
+  }
+
+  static Future<void> _restoreMirror() async {
+    try {
+      final String mir = prefs.getString('tmc_mirror') ?? '';
+      if (mir.isEmpty) return;
+      final dynamic j = jsonDecode(mir);
+      if (j is Map<String, dynamic>) {
+        root['users'] =
+            (j['users'] as Map<String, dynamic>?) ?? <String, dynamic>{};
+      }
+    } catch (_) {}
+  }
+
+  static Future<void> _load() async {
+    Map<String, dynamic>? best;
+    String bestDate = '';
+    for (final File f in _files) {
+      try {
+        if (!f.existsSync()) continue;
+        final String raw = f.readAsStringSync();
+        if (raw.trim().isEmpty) continue;
+        final dynamic j = jsonDecode(raw);
+        if (j is! Map<String, dynamic>) continue;
+        final String d = (j['updated'] ?? '').toString();
+        if (best == null || d.compareTo(bestDate) > 0) {
+          best = j;
+          bestDate = d;
+        }
+      } catch (_) {}
+    }
+    if (best != null && best['users'] is Map) {
+      root['users'] = (best['users'] as Map<dynamic, dynamic>).cast<String, dynamic>();
+      root['updated'] = bestDate;
+    }
+  }
+
+  static Future<void> save() async {
+    root['updated'] = DateTime.now().toIso8601String();
+    final String raw = jsonEncode(root);
+    try {
+      await prefs.setString('tmc_mirror', raw);
+    } catch (_) {}
+    for (final File f in _files) {
+      try {
+        await f.writeAsString(raw, flush: true);
+      } catch (_) {}
+    }
+  }
+}
+
+// ============================ CONTAS =================================
+class Auth {
+  static final RegExp _ok = RegExp(r'^[a-zA-Z0-9._-]{3,18}$');
+
+  static String hash(String u, String p) {
+    final String s = 'tmc|${u.trim().toLowerCase()}|$p|tmc';
+    int a = 7;
+    for (final int c in s.codeUnits) {
+      a = ((a * 31) + c) & 0xFFFFFFFF;
+    }
+    int b = 5381;
+    for (int i = s.length - 1; i >= 0; i--) {
+      b = ((b * 33) + s.codeUnitAt(i)) & 0xFFFFFFFF;
+    }
+    return '${a.toRadixString(16).padLeft(8, '0')}${b.toRadixString(16).padLeft(8, '0')}';
+  }
+
+  static String validateUser(String u) {
+    final String t = u.trim();
+    if (t.length < 3) return 'Use pelo menos 3 caracteres no usuario.';
+    if (!_ok.hasMatch(t)) return 'Use apenas letras, numeros, ponto, hifen ou _.';
+    return '';
+  }
+
+  static String validatePass(String p) {
+    if (p.trim().length < 4) return 'A senha precisa de pelo menos 4 caracteres.';
+    return '';
+  }
+
+  static String? login(String u, String p) {
+    final String t = u.trim();
+    if (!LocalDb.exists(t)) return 'Usuario nao encontrado neste aparelho.';
+    if (LocalDb.hashOf(t) != hash(t, p)) return 'Senha incorreta.';
+    return null;
+  }
+
+  static Future<String?> register(String u, String p) async {
+    final String eu = validateUser(u);
+    if (eu.isNotEmpty) return eu;
+    final String ep = validatePass(p);
+    if (ep.isNotEmpty) return ep;
+    if (LocalDb.exists(u)) return 'Este usuario ja existe. Faca login.';
+    await LocalDb.addUser(u, hash(u, p));
+    return null;
   }
 }
 
@@ -95,7 +284,6 @@ class MediaItem {
   final String? date;
   final double rating;
   final bool isTv;
-  final List<int> genres;
 
   MediaItem({
     required this.id,
@@ -106,7 +294,6 @@ class MediaItem {
     this.date,
     this.rating = 0,
     required this.isTv,
-    this.genres = const <int>[],
   });
 
   String get key => isTv ? 'tv_$id' : 'movie_$id';
@@ -133,9 +320,6 @@ class MediaItem {
       date: (isTv ? j['first_air_date'] : j['release_date'])?.toString(),
       rating: ((j['vote_average'] ?? 0) as num).toDouble(),
       isTv: isTv,
-      genres: ((j['genre_ids'] as List<dynamic>?) ?? const <dynamic>[])
-          .map((dynamic e) => (e as num).toInt())
-          .toList(),
     );
   }
 
@@ -168,7 +352,6 @@ class Episode {
   final String name;
   final String overview;
   final String? still;
-  final String? air;
   final int runtime;
 
   Episode({
@@ -176,7 +359,6 @@ class Episode {
     required this.name,
     this.overview = '',
     this.still,
-    this.air,
     this.runtime = 0,
   });
 
@@ -188,7 +370,6 @@ class Episode {
         name: (j['name'] ?? 'Capitulo').toString(),
         overview: (j['overview'] ?? '').toString(),
         still: j['still_path']?.toString(),
-        air: j['air_date']?.toString(),
         runtime: (j['runtime'] ?? 0) as int,
       );
 }
@@ -208,8 +389,7 @@ class WatchItem {
     this.duration = 0,
   });
 
-  String get key =>
-      media.isTv ? '${media.key}_${season}_$episode' : media.key;
+  String get key => media.isTv ? '${media.key}_${season}_$episode' : media.key;
 
   double get progress =>
       duration <= 0 ? 0.0 : (position / duration).clamp(0.0, 1.0);
@@ -234,86 +414,156 @@ class WatchItem {
       );
 }
 
+class Channel {
+  final String name;
+  final String url;
+  final String group;
+
+  const Channel(this.name, this.url, [this.group = 'ABERTOS']);
+
+  Map<String, dynamic> toJson() =>
+      <String, dynamic>{'n': name, 'u': url, 'g': group};
+
+  static Channel fromJson(Map<String, dynamic> j) => Channel(
+        (j['n'] ?? '').toString(),
+        (j['u'] ?? '').toString(),
+        (j['g'] ?? 'MEUS CANAIS').toString(),
+      );
+}
+
+class HlsVariant {
+  final String url;
+  final int bandwidth;
+  final String label;
+
+  const HlsVariant(this.url, this.bandwidth, this.label);
+}
+
 // ========================= ARMAZENAMENTO =============================
 class Store {
-  static const String kFavs = 'tmc_favs';
-  static const String kProg = 'tmc_progress';
   static final ValueNotifier<int> revision = ValueNotifier<int>(0);
+  static String user = '';
+  static List<MediaItem> favs = <MediaItem>[];
+  static List<WatchItem> prog = <WatchItem>[];
+  static DateTime _lastFile = DateTime.fromMillisecondsSinceEpoch(0);
 
-  static List<String> _favKeys() => prefs.getStringList(kFavs) ?? <String>[];
-  static List<String> _progKeys() => prefs.getStringList(kProg) ?? <String>[];
+  static String get _prefKey => 'tmc_data_$user';
 
-  static bool isFav(String key) => prefs.getBool('fav_$key') ?? false;
-
-  static Future<void> toggleFav(MediaItem m) async {
-    final List<String> list = _favKeys().toList();
-    if (isFav(m.key)) {
-      await prefs.setBool('fav_${m.key}', false);
-      list.remove(m.key);
-    } else {
-      await prefs.setBool('fav_${m.key}', true);
-      await prefs.setString('favd_${m.key}', jsonEncode(m.toJson()));
-      list.remove(m.key);
-      list.insert(0, m.key);
-    }
-    await prefs.setStringList(kFavs, list);
-    revision.value++;
-  }
-
-  static List<MediaItem> favorites() {
+  static List<MediaItem> _parseFavs(Map<String, dynamic> j) {
+    final List<dynamic> raw = (j['favs'] as List<dynamic>?) ?? const <dynamic>[];
     final List<MediaItem> out = <MediaItem>[];
-    for (final String k in _favKeys()) {
-      final String? raw = prefs.getString('favd_$k');
-      if (raw == null) continue;
+    for (final dynamic e in raw) {
       try {
-        out.add(MediaItem.fromStored(jsonDecode(raw) as Map<String, dynamic>));
+        out.add(MediaItem.fromStored(
+            (e as Map<dynamic, dynamic>).cast<String, dynamic>()));
       } catch (_) {}
     }
     return out;
   }
 
-  static WatchItem? progress(String key) {
-    final String? raw = prefs.getString('prog_$key');
-    if (raw == null) return null;
-    try {
-      return WatchItem.fromJson(jsonDecode(raw) as Map<String, dynamic>);
-    } catch (_) {
-      return null;
-    }
-  }
-
-  static int seconds(String key) => prefs.getInt('pos_$key') ?? 0;
-
-  static Future<void> saveProgress(WatchItem w) async {
-    if (w.position < 5) return;
-    final List<String> list = _progKeys().toList();
-    list.remove(w.key);
-    list.insert(0, w.key);
-    await prefs.setStringList(kProg, list);
-    await prefs.setString('prog_${w.key}', jsonEncode(w.toJson()));
-    await prefs.setInt('pos_${w.key}', w.position);
-    revision.value++;
-  }
-
-  static Future<void> removeProgress(String key) async {
-    final List<String> list = _progKeys().toList();
-    list.remove(key);
-    await prefs.setStringList(kProg, list);
-    await prefs.remove('prog_$key');
-    await prefs.remove('pos_$key');
-    revision.value++;
-  }
-
-  static List<WatchItem> continueWatching() {
+  static List<WatchItem> _parseProg(Map<String, dynamic> j) {
+    final List<dynamic> raw = (j['prog'] as List<dynamic>?) ?? const <dynamic>[];
     final List<WatchItem> out = <WatchItem>[];
-    for (final String k in _progKeys()) {
-      final WatchItem? w = progress(k);
-      if (w == null) continue;
-      if (w.duration > 0 && w.progress >= 0.95) continue;
-      out.add(w);
+    for (final dynamic e in raw) {
+      try {
+        out.add(WatchItem.fromJson(
+            (e as Map<dynamic, dynamic>).cast<String, dynamic>()));
+      } catch (_) {}
     }
     return out;
   }
+
+  static Future<void> load(String u) async {
+    user = u.trim();
+    favs = <MediaItem>[];
+    prog = <WatchItem>[];
+    String raw = '';
+    try {
+      raw = prefs.getString(_prefKey) ?? '';
+    } catch (_) {}
+    if (raw.isEmpty) {
+      final Map<String, dynamic>? m = LocalDb.user(user);
+      if (m != null) {
+        favs = _parseFavs(m);
+        prog = _parseProg(m);
+      }
+    } else {
+      try {
+        final Map<String, dynamic> j = jsonDecode(raw) as Map<String, dynamic>;
+        favs = _parseFavs(j);
+        prog = _parseProg(j);
+      } catch (_) {}
+    }
+    revision.value++;
+  }
+
+  static Future<void> persist() async {
+    final Map<String, dynamic> j = <String, dynamic>{
+      'favs': favs.map((MediaItem m) => m.toJson()).toList(),
+      'prog': prog.map((WatchItem w) => w.toJson()).toList(),
+    };
+    try {
+      await prefs.setString(_prefKey, jsonEncode(j));
+    } catch (_) {}
+    try {
+      await LocalDb.setUserData(user, j);
+      final DateTime now = DateTime.now();
+      if (now.difference(_lastFile).inSeconds >= 8) {
+        _lastFile = now;
+        await LocalDb.save();
+      }
+    } catch (_) {}
+    revision.value++;
+  }
+
+  static bool isFav(String key) => favs.any((MediaItem m) => m.key == key);
+
+  static Future<void> toggleFav(MediaItem m) async {
+    if (isFav(m.key)) {
+      favs = favs.where((MediaItem x) => x.key != m.key).toList();
+    } else {
+      favs = <MediaItem>[m, ...favs.where((MediaItem x) => x.key != m.key)];
+    }
+    await persist();
+  }
+
+  static Future<void> removeFav(String key) async {
+    favs = favs.where((MediaItem m) => m.key != key).toList();
+    await persist();
+  }
+
+  static Future<void> clearFavs() async {
+    favs = <MediaItem>[];
+    await persist();
+  }
+
+  static int seconds(String key) {
+    for (final WatchItem w in prog) {
+      if (w.key == key) return w.position;
+    }
+    return 0;
+  }
+
+  static Future<void> saveProgress(WatchItem w) async {
+    if (w.position < 5 || w.duration <= 0) return;
+    prog = <WatchItem>[w, ...prog.where((WatchItem x) => x.key != w.key)];
+    if (prog.length > 60) prog = prog.sublist(0, 60);
+    await persist();
+  }
+
+  static Future<void> removeProgress(String key) async {
+    prog = prog.where((WatchItem w) => w.key != key).toList();
+    await persist();
+  }
+
+  static Future<void> clearProgress() async {
+    prog = <WatchItem>[];
+    await persist();
+  }
+
+  static List<WatchItem> continueWatching() => prog
+      .where((WatchItem w) => !(w.duration > 0 && w.progress >= 0.95))
+      .toList();
 }
 
 // ============================ SERVICO TMDB ===========================
@@ -397,6 +647,16 @@ class TmdbService {
     return out;
   }
 
+  /// Pagina unica - usada pelo scroll infinito das abas.
+  static Future<List<MediaItem>> page(
+      String path, bool isTv, int page, Map<String, String> q) async {
+    try {
+      return await _list(path, isTv, <String, String>{...q, 'page': '$page'});
+    } catch (_) {
+      return <MediaItem>[];
+    }
+  }
+
   static Future<List<MediaItem>> trending({int pages = 3}) =>
       _pages('/trending/all/week', false, pages: pages, auto: true);
 
@@ -406,17 +666,8 @@ class TmdbService {
   static Future<List<MediaItem>> topMovies({int pages = 1}) =>
       _pages('/movie/top_rated', false, pages: pages);
 
-  static Future<List<MediaItem>> nowPlaying({int pages = 1}) =>
-      _pages('/movie/now_playing', false, pages: pages);
-
   static Future<List<MediaItem>> popularTv({int pages = 3}) =>
       _pages('/tv/popular', true, pages: pages);
-
-  static Future<List<MediaItem>> topTv({int pages = 1}) =>
-      _pages('/tv/top_rated', true, pages: pages);
-
-  static Future<List<MediaItem>> onAirTv({int pages = 2}) =>
-      _pages('/tv/on_the_air', true, pages: pages);
 
   static Future<List<MediaItem>> novelas({int pages = 2}) => _pages(
         '/discover/tv',
@@ -449,12 +700,12 @@ class TmdbService {
         },
       );
 
-  static Future<List<MediaItem>> animations({int pages = 1}) => _pages(
+  static Future<List<MediaItem>> kidsMovies({int pages = 2}) => _pages(
         '/discover/movie',
         false,
         pages: pages,
         q: <String, String>{
-          'with_genres': '$kGenreAnimation',
+          'with_genres': '$kGenreAnimation,10751',
           'sort_by': 'popularity.desc',
         },
       );
@@ -476,11 +727,8 @@ class TmdbService {
         },
       );
 
-  static Future<Map<String, dynamic>> season(int id, int s) =>
-      _get('/tv/$id/season/$s');
-
   static Future<List<Episode>> episodes(int id, int s) async {
-    final Map<String, dynamic> d = await season(id, s);
+    final Map<String, dynamic> d = await _get('/tv/$id/season/$s');
     final List<dynamic> raw =
         (d['episodes'] as List<dynamic>?) ?? const <dynamic>[];
     return raw
@@ -569,24 +817,24 @@ class Resolver {
   static final RegExp _iframe =
       RegExp(r'''<iframe[^>]*src=["']([^"']+)["']''', caseSensitive: false);
 
-  static Map<String, String> _headers([String referer = '']) {
+  static Map<String, String> headers([String referer = '']) {
     final Map<String, String> h = <String, String>{'User-Agent': kUserAgent};
     if (referer.isNotEmpty) h['Referer'] = referer;
     return h;
   }
 
-  /// Varredura silenciosa: confirma se o servidor esta no ar (HTTP 2xx/3xx).
+  /// Varredura silenciosa via HEAD: confirma se o servidor esta vivo.
   static Future<bool> alive(String url) async {
     try {
       final http.Response r = await http
-          .head(Uri.parse(url), headers: _headers())
-          .timeout(const Duration(seconds: 8));
+          .head(Uri.parse(url), headers: headers())
+          .timeout(const Duration(seconds: 7));
       if (r.statusCode >= 200 && r.statusCode < 400) return true;
     } catch (_) {}
     try {
       final http.Response r = await http
-          .get(Uri.parse(url), headers: _headers())
-          .timeout(const Duration(seconds: 12));
+          .get(Uri.parse(url), headers: headers())
+          .timeout(const Duration(seconds: 11));
       return r.statusCode >= 200 && r.statusCode < 400;
     } catch (_) {
       return false;
@@ -601,7 +849,7 @@ class Resolver {
     String body = '';
     try {
       final http.Response r = await http
-          .get(Uri.parse(pageUrl), headers: _headers(pageUrl))
+          .get(Uri.parse(pageUrl), headers: headers(pageUrl))
           .timeout(const Duration(seconds: 15));
       body = r.body;
     } catch (_) {}
@@ -619,7 +867,7 @@ class Resolver {
       src = Uri.parse(pageUrl).resolve(src).toString();
       try {
         final http.Response r2 = await http
-            .get(Uri.parse(src), headers: _headers(pageUrl))
+            .get(Uri.parse(src), headers: headers(pageUrl))
             .timeout(const Duration(seconds: 12));
         final Match? m2 = _m3u8.firstMatch(r2.body);
         if (m2 != null) {
@@ -636,7 +884,7 @@ class Resolver {
         provider: p.name, url: pageUrl, direct: false, referer: pageUrl);
   }
 
-  /// Escolhe a melhor fonte viva: prioriza link direto (.m3u8).
+  /// Escolhe a melhor fonte viva: prioriza sempre o link direto (.m3u8).
   static Future<PlayTarget?> best(bool isTv, int id, int season, int episode,
       {int forced = -1}) async {
     final List<Provider> list =
@@ -652,15 +900,86 @@ class Resolver {
   }
 }
 
-// ======================= HELPERS DE NAVEGACAO ========================
+// =================== HLS: QUALIDADE AUTOMATICA =======================
+class Hls {
+  static Future<List<HlsVariant>> variants(
+      String url, Map<String, String> headers) async {
+    try {
+      final http.Response r = await http
+          .get(Uri.parse(url), headers: headers)
+          .timeout(const Duration(seconds: 12));
+      final String body = r.body;
+      if (!body.contains('#EXT-X-STREAM-INF')) return <HlsVariant>[];
+      final List<String> lines = const LineSplitter().convert(body);
+      final List<HlsVariant> out = <HlsVariant>[];
+      for (int i = 0; i < lines.length; i++) {
+        final String l = lines[i].trim();
+        if (!l.startsWith('#EXT-X-STREAM-INF')) continue;
+        int bw = 0;
+        final Match? mb = RegExp(r'BANDWIDTH=(\d+)').firstMatch(l);
+        if (mb != null) bw = int.tryParse(mb.group(1)!) ?? 0;
+        String res = '';
+        final Match? mr = RegExp(r'RESOLUTION=(\d+x\d+)').firstMatch(l);
+        if (mr != null) res = mr.group(1)!;
+        for (int k = i + 1; k < lines.length; k++) {
+          final String n = lines[k].trim();
+          if (n.isEmpty || n.startsWith('#')) continue;
+          final String label =
+              res.isEmpty ? '${(bw / 1000).round()}k' : res;
+          out.add(HlsVariant(Uri.parse(url).resolve(n).toString(), bw, label));
+          break;
+        }
+      }
+      out.sort((HlsVariant a, HlsVariant b) =>
+          a.bandwidth.compareTo(b.bandwidth));
+      return out;
+    } catch (_) {
+      return <HlsVariant>[];
+    }
+  }
+}
+
+// ============================ HELPERS ================================
+String _fmtSeg(int seconds) {
+  final int h = seconds ~/ 3600;
+  final int m = (seconds % 3600) ~/ 60;
+  final int s = seconds % 60;
+  final String mm = m.toString().padLeft(2, '0');
+  final String ss = s.toString().padLeft(2, '0');
+  return h > 0 ? '$h:$mm:$ss' : '$mm:$ss';
+}
+
+Future<bool> askConfirm(
+    BuildContext context, String title, String message) async {
+  final bool? r = await showDialog<bool>(
+    context: context,
+    builder: (BuildContext ctx) => AlertDialog(
+      backgroundColor: kSurface,
+      title: Text(title),
+      content: Text(message, style: const TextStyle(color: Colors.white70)),
+      actions: <Widget>[
+        TextButton(
+          onPressed: () => Navigator.of(ctx).pop(false),
+          child: const Text('Cancelar'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(ctx).pop(true),
+          child: const Text('Confirmar'),
+        ),
+      ],
+    ),
+  );
+  return r ?? false;
+}
+
 class LoadingDialog extends StatelessWidget {
   const LoadingDialog({super.key});
   @override
   Widget build(BuildContext context) {
     return const Center(
       child: SizedBox(
-        width: 72,
-        height: 72,
+        width: 74,
+        height: 74,
         child: Card(
           color: kSurface,
           child: Padding(
@@ -673,6 +992,7 @@ class LoadingDialog extends StatelessWidget {
   }
 }
 
+// =================== NAVEGACAO PARA O PLAYER =========================
 Future<void> openPlayer(
   BuildContext context,
   MediaItem item, {
@@ -781,45 +1101,409 @@ Future<void> showTrailer(
   );
 }
 
-// ============================== SHELL ================================
-class RootShell extends StatefulWidget {
-  const RootShell({super.key});
+// ======================= SCROLL PARA WEB =============================
+class TmcScrollBehavior extends MaterialScrollBehavior {
+  const TmcScrollBehavior();
+
   @override
-  State<RootShell> createState() => _RootShellState();
+  Set<PointerDeviceKind> get dragDevices => <PointerDeviceKind>{
+        PointerDeviceKind.touch,
+        PointerDeviceKind.mouse,
+        PointerDeviceKind.trackpad,
+        PointerDeviceKind.stylus,
+        PointerDeviceKind.invertedStylus,
+        PointerDeviceKind.unknown,
+      };
 }
 
-class _RootShellState extends State<RootShell> {
-  int _i = 0;
+// ============================== APP ==================================
+class TmcApp extends StatefulWidget {
+  const TmcApp({super.key});
+  @override
+  State<TmcApp> createState() => _TmcAppState();
+}
+
+class _TmcAppState extends State<TmcApp> with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      CacheKeeper.trim();
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: IndexedStack(
-        index: _i,
-        children: const <Widget>[HomeScreen(), SearchScreen(), FavoritesScreen()],
+    final ThemeData base = ThemeData.dark(useMaterial3: true);
+    final String? font = GoogleFonts.poppins().fontFamily;
+
+    return MaterialApp(
+      title: 'TMC',
+      debugShowCheckedModeBanner: false,
+      scrollBehavior: const TmcScrollBehavior(),
+      theme: base.copyWith(
+        scaffoldBackgroundColor: kBg,
+        colorScheme: base.colorScheme.copyWith(
+          primary: kAccent,
+          secondary: kGold,
+          surface: kSurface,
+        ),
+        textTheme: base.textTheme.apply(
+          fontFamily: font,
+          bodyColor: Colors.white,
+          displayColor: Colors.white,
+        ),
+        appBarTheme: const AppBarTheme(backgroundColor: kBg, elevation: 0),
+        snackBarTheme: const SnackBarThemeData(
+          backgroundColor: kCard,
+          contentTextStyle: TextStyle(color: Colors.white),
+          behavior: SnackBarBehavior.floating,
+        ),
       ),
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: _i,
-        backgroundColor: kSurface,
-        indicatorColor: kAccent,
-        onDestinationSelected: (int v) => setState(() => _i = v),
-        destinations: const <NavigationDestination>[
-          NavigationDestination(
-              icon: Icon(Icons.home_outlined),
-              selectedIcon: Icon(Icons.home),
-              label: 'Inicio'),
-          NavigationDestination(icon: Icon(Icons.search), label: 'Buscar'),
-          NavigationDestination(
-              icon: Icon(Icons.favorite_border),
-              selectedIcon: Icon(Icons.favorite),
-              label: 'Favoritos'),
-        ],
+      home: const EntryGate(),
+    );
+  }
+}
+
+class EntryGate extends StatefulWidget {
+  const EntryGate({super.key});
+  @override
+  State<EntryGate> createState() => _EntryGateState();
+}
+
+class _EntryGateState extends State<EntryGate> {
+  String _user = '';
+  bool _boot = true;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _auto());
+  }
+
+  Future<void> _auto() async {
+    try {
+      final String last = prefs.getString('tmc_last_user') ?? '';
+      if (last.isNotEmpty && LocalDb.exists(last)) {
+        await Store.load(last);
+        if (!mounted) return;
+        setState(() {
+          _user = last;
+          _boot = false;
+        });
+        return;
+      }
+    } catch (_) {}
+    if (mounted) setState(() => _boot = false);
+  }
+
+  Future<void> _logged(String u) async {
+    try {
+      await prefs.setString('tmc_last_user', u);
+    } catch (_) {}
+    if (mounted) setState(() => _user = u);
+  }
+
+  Future<void> _logout() async {
+    try {
+      await prefs.remove('tmc_last_user');
+    } catch (_) {}
+    Store.user = '';
+    if (mounted) setState(() => _user = '');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_boot) return const SplashScreen();
+    if (_user.isEmpty) return LoginScreen(onDone: _logged);
+    return RootShell(onLogout: _logout);
+  }
+}
+
+class SplashScreen extends StatelessWidget {
+  const SplashScreen({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return const Scaffold(
+      backgroundColor: kBg,
+      body: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            TmcLogo(size: 76),
+            SizedBox(height: 18),
+            SizedBox(
+              width: 22,
+              height: 22,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+          ],
+        ),
       ),
     );
   }
 }
 
-// =========================== LOGO / CHIP =============================
+// ============================== LOGIN ================================
+class LoginScreen extends StatefulWidget {
+  final Future<void> Function(String user) onDone;
+  const LoginScreen({super.key, required this.onDone});
+
+  @override
+  State<LoginScreen> createState() => _LoginScreenState();
+}
+
+class _LoginScreenState extends State<LoginScreen> {
+  final TextEditingController _u = TextEditingController();
+  final TextEditingController _p = TextEditingController();
+  bool _create = false;
+  bool _busy = false;
+  bool _see = false;
+  String _err = '';
+  List<String> _contas = <String>[];
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _refresh());
+  }
+
+  @override
+  void dispose() {
+    _u.dispose();
+    _p.dispose();
+    super.dispose();
+  }
+
+  void _refresh() {
+    if (!mounted) return;
+    setState(() => _contas = LocalDb.names());
+  }
+
+  Future<void> _submit() async {
+    if (_busy) return;
+    final String u = _u.text.trim();
+    final String p = _p.text;
+    FocusScope.of(context).unfocus();
+    setState(() {
+      _busy = true;
+      _err = '';
+    });
+
+    String? e;
+    if (_create) {
+      e = await Auth.register(u, p);
+      e ??= Auth.login(u, p);
+    } else {
+      e = Auth.login(u, p);
+    }
+
+    if (e != null) {
+      if (mounted) {
+        setState(() {
+          _err = e!;
+          _busy = false;
+        });
+      }
+      return;
+    }
+
+    await Store.load(u);
+    await widget.onDone(u);
+    if (mounted) setState(() => _busy = false);
+  }
+
+  Future<void> _reimport() async {
+    await LocalDb.init();
+    _refresh();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Backup recarregado de: ${LocalDb.location}')),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: kBg,
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(22),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 430),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  const TmcLogo(size: 72),
+                  const SizedBox(height: 14),
+                  const Text('TMC',
+                      style: TextStyle(
+                          fontSize: 30,
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: 6)),
+                  const SizedBox(height: 4),
+                  const Text('FILMES - SERIES - NOVELAS - KIDS - TV',
+                      style: TextStyle(
+                          fontSize: 11,
+                          color: Colors.white38,
+                          letterSpacing: 1)),
+                  const SizedBox(height: 26),
+                  Card(
+                    color: kSurface,
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16)),
+                    child: Padding(
+                      padding: const EdgeInsets.all(18),
+                      child: Column(
+                        children: <Widget>[
+                          Row(
+                            children: <Widget>[
+                              Expanded(
+                                child: _modeButton('ENTRAR', !_create),
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: _modeButton('CRIAR CONTA', _create),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 16),
+                          TextField(
+                            controller: _u,
+                            autofocus: true,
+                            textInputAction: TextInputAction.next,
+                            decoration: const InputDecoration(
+                              labelText: 'Usuario',
+                              prefixIcon: Icon(Icons.person_outline),
+                              border: OutlineInputBorder(),
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          TextField(
+                            controller: _p,
+                            obscureText: !_see,
+                            textInputAction: TextInputAction.done,
+                            onSubmitted: (String _) => _submit(),
+                            decoration: InputDecoration(
+                              labelText: 'Senha',
+                              prefixIcon: const Icon(Icons.lock_outline),
+                              border: const OutlineInputBorder(),
+                              suffixIcon: IconButton(
+                                icon: Icon(_see
+                                    ? Icons.visibility_off
+                                    : Icons.visibility),
+                                onPressed: () => setState(() => _see = !_see),
+                              ),
+                            ),
+                          ),
+                          if (_err.isNotEmpty) ...<Widget>[
+                            const SizedBox(height: 12),
+                            Text(_err,
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(
+                                    color: kRed, fontSize: 12.5)),
+                          ],
+                          const SizedBox(height: 16),
+                          SizedBox(
+                            width: double.infinity,
+                            child: FilledButton.icon(
+                              onPressed: _busy ? null : _submit,
+                              style: FilledButton.styleFrom(
+                                  padding:
+                                      const EdgeInsets.symmetric(vertical: 15)),
+                              icon: _busy
+                                  ? const SizedBox(
+                                      width: 16,
+                                      height: 16,
+                                      child: CircularProgressIndicator(
+                                          strokeWidth: 2))
+                                  : const Icon(Icons.login),
+                              label: Text(
+                                _create ? 'CRIAR E ENTRAR' : 'ENTRAR',
+                                style: const TextStyle(
+                                    fontWeight: FontWeight.w900,
+                                    letterSpacing: 0.8),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  if (_contas.isNotEmpty) ...<Widget>[
+                    const SizedBox(height: 18),
+                    const Text('Contas neste aparelho',
+                        style: TextStyle(fontSize: 11.5, color: Colors.white38)),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      alignment: WrapAlignment.center,
+                      children: _contas
+                          .map((String c) => ActionChip(
+                                label: Text(c),
+                                onPressed: () {
+                                  _u.text = c;
+                                  setState(() => _create = false);
+                                },
+                              ))
+                          .toList(),
+                    ),
+                  ],
+                  const SizedBox(height: 22),
+                  Text(
+                    'Backup automatico em: ${LocalDb.location}',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(fontSize: 10.5, color: Colors.white38),
+                  ),
+                  TextButton.icon(
+                    onPressed: _reimport,
+                    icon: const Icon(Icons.restore, size: 16),
+                    label: const Text('REIMPORTAR BACKUP DO ARQUIVO'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _modeButton(String label, bool on) {
+    return SizedBox(
+      height: 40,
+      child: on
+          ? FilledButton(
+              onPressed: () => setState(() => _create = label != 'ENTRAR'),
+              style: FilledButton.styleFrom(backgroundColor: kAccent),
+              child: Text(label, style: const TextStyle(fontSize: 12)),
+            )
+          : OutlinedButton(
+              onPressed: () => setState(() => _create = label != 'ENTRAR'),
+              style: OutlinedButton.styleFrom(
+                  foregroundColor: Colors.white70,
+                  side: const BorderSide(color: Colors.white24)),
+              child: Text(label, style: const TextStyle(fontSize: 12)),
+            ),
+    );
+  }
+}
+
+// ============================== LOGO =================================
 class TmcLogo extends StatelessWidget {
   final double size;
   const TmcLogo({super.key, this.size = 32});
@@ -830,16 +1514,16 @@ class TmcLogo extends StatelessWidget {
       width: size,
       height: size,
       decoration: BoxDecoration(
-        gradient: const LinearGradient(
-            colors: <Color>[Color(0xFF1E4AAA), kAccent]),
+        gradient:
+            const LinearGradient(colors: <Color>[Color(0xFF1E4AAA), kAccent]),
         borderRadius: BorderRadius.circular(size * 0.26),
       ),
       child: Center(
         child: Text(
-          'MC',
+          'TMC',
           style: TextStyle(
             fontWeight: FontWeight.w900,
-            fontSize: size * 0.44,
+            fontSize: size * 0.3,
             letterSpacing: -0.5,
           ),
         ),
@@ -848,47 +1532,382 @@ class TmcLogo extends StatelessWidget {
   }
 }
 
-// ============================ HOME ===================================
-class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
-  @override
-  State<HomeScreen> createState() => _HomeScreenState();
+// ============================ CATALOGO ===============================
+class GenreChip {
+  final String label;
+  final String path;
+  final String withGenres;
+  final Map<String, String> extra;
+
+  const GenreChip(this.label,
+      {required this.path,
+      this.withGenres = '',
+      this.extra = const <String, String>{}});
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+const List<GenreChip> kChipsFilmes = <GenreChip>[
+  GenreChip('TODOS', path: '/discover/movie'),
+  GenreChip('ACAO', path: '/discover/movie', withGenres: '28'),
+  GenreChip('COMEDIA', path: '/discover/movie', withGenres: '35'),
+  GenreChip('AVENTURA', path: '/discover/movie', withGenres: '12'),
+  GenreChip('FICCAO', path: '/discover/movie', withGenres: '878'),
+  GenreChip('TERROR', path: '/discover/movie', withGenres: '27'),
+  GenreChip('SUSPENSE', path: '/discover/movie', withGenres: '53'),
+  GenreChip('ROMANCE', path: '/discover/movie', withGenres: '10749'),
+  GenreChip('CRIME', path: '/discover/movie', withGenres: '80'),
+  GenreChip('ANIMACAO', path: '/discover/movie', withGenres: '16'),
+  GenreChip('FAMILIA', path: '/discover/movie', withGenres: '10751'),
+  GenreChip('DOCUMENTARIO', path: '/discover/movie', withGenres: '99'),
+  GenreChip('ACLAMADOS',
+      path: '/discover/movie',
+      extra: <String, String>{
+        'sort_by': 'vote_average.desc',
+        'vote_count.gte': '800',
+      }),
+];
+
+const List<GenreChip> kChipsSeries = <GenreChip>[
+  GenreChip('TODAS', path: '/discover/tv'),
+  GenreChip('NOVELAS', path: '/discover/tv', withGenres: '10766'),
+  GenreChip('DRAMA', path: '/discover/tv', withGenres: '18'),
+  GenreChip('COMEDIA', path: '/discover/tv', withGenres: '35'),
+  GenreChip('CRIME', path: '/discover/tv', withGenres: '80'),
+  GenreChip('MISTERIO', path: '/discover/tv', withGenres: '9648'),
+  GenreChip('SCI-FI', path: '/discover/tv', withGenres: '10765'),
+  GenreChip('ACAO', path: '/discover/tv', withGenres: '10759'),
+  GenreChip('DORAMAS',
+      path: '/discover/tv',
+      withGenres: '18',
+      extra: <String, String>{'with_origin_country': 'KR'}),
+  GenreChip('ANIMES',
+      path: '/discover/tv',
+      withGenres: '16',
+      extra: <String, String>{'with_origin_country': 'JP'}),
+];
+
+const List<GenreChip> kChipsDramas = <GenreChip>[
+  GenreChip('TODOS', path: '/discover/tv'),
+  GenreChip('DRAMA', path: '/discover/tv', withGenres: '18'),
+  GenreChip('ROMANCE', path: '/discover/tv', withGenres: '10749'),
+  GenreChip('COMEDIA', path: '/discover/tv', withGenres: '35'),
+  GenreChip('NOVELAS', path: '/discover/tv', withGenres: '10766'),
+  GenreChip('DORAMAS',
+      path: '/discover/tv',
+      withGenres: '18',
+      extra: <String, String>{'with_origin_country': 'KR'}),
+];
+
+const List<GenreChip> kChipsKids = <GenreChip>[
+  GenreChip('ANIMACAO', path: '/discover/movie', withGenres: '16'),
+  GenreChip('FAMILIA', path: '/discover/movie', withGenres: '10751'),
+  GenreChip('AVENTURA', path: '/discover/movie', withGenres: '12'),
+  GenreChip('SERIES INFANTIS', path: '/discover/tv', withGenres: '10762'),
+  GenreChip('DESENHOS TV', path: '/discover/tv', withGenres: '16'),
+  GenreChip('ANIMES KIDS',
+      path: '/discover/tv',
+      withGenres: '16',
+      extra: <String, String>{'with_origin_country': 'JP'}),
+];
+
+// ============================== SHELL ================================
+class RootShell extends StatefulWidget {
+  final Future<void> Function() onLogout;
+  const RootShell({super.key, required this.onLogout});
+
+  @override
+  State<RootShell> createState() => _RootShellState();
+}
+
+class _RootShellState extends State<RootShell>
+    with SingleTickerProviderStateMixin {
+  static const List<String> _labels = <String>[
+    'INICIO',
+    'FILMES',
+    'SERIES E NOVELAS',
+    'DRAMAS CURTOS',
+    'KIDS',
+    'TV ONLINE',
+  ];
+
+  late final TabController _tabs =
+      TabController(length: _labels.length, vsync: this);
+  late final List<Widget> _pages = _buildPages();
+  int _idx = 0;
+
+  List<Widget> _buildPages() => <Widget>[
+        const HomeTab(),
+        const DiscoverTab(
+          chips: kChipsFilmes,
+          base: <String, String>{},
+          empty: 'Nenhum filme encontrado.',
+        ),
+        const DiscoverTab(
+          chips: kChipsSeries,
+          base: <String, String>{},
+          empty: 'Nenhuma serie encontrada.',
+        ),
+        const DiscoverTab(
+          chips: kChipsDramas,
+          base: <String, String>{'with_runtime.lte': '45'},
+          empty: 'Nenhum drama curto encontrado.',
+        ),
+        const DiscoverTab(
+          chips: kChipsKids,
+          base: <String, String>{},
+          empty: 'Nada para a criancada por aqui.',
+        ),
+        const OnlineTvTab(),
+      ];
+
+  @override
+  void initState() {
+    super.initState();
+    _tabs.addListener(_onTab);
+  }
+
+  @override
+  void dispose() {
+    _tabs.removeListener(_onTab);
+    _tabs.dispose();
+    super.dispose();
+  }
+
+  void _onTab() {
+    if (_tabs.indexIsChanging) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _idx != _tabs.index) setState(() => _idx = _tabs.index);
+    });
+  }
+
+  void _search() {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(builder: (_) => const SearchScreen()),
+    );
+  }
+
+  void _clean() {
+    CacheKeeper.wipe();
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Cache de imagens e temporarios liberados.')));
+  }
+
+  Future<void> _backup() async {
+    await Store.persist();
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (BuildContext ctx) => AlertDialog(
+        backgroundColor: kSurface,
+        title: const Text('Backup do perfil'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text('Conta: ${Store.user}',
+                style: const TextStyle(fontWeight: FontWeight.w700)),
+            const SizedBox(height: 8),
+            const Text(
+              'Favoritos e historico sao salvos automaticamente em arquivo. '
+              'Reinstale o app e use REIMPORTAR BACKUP na tela de login.',
+              style: TextStyle(fontSize: 12, color: Colors.white70),
+            ),
+            const SizedBox(height: 10),
+            Text('Local: ${LocalDb.location}',
+                style: const TextStyle(fontSize: 11, color: kGold)),
+          ],
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Fechar'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _clearHist() async {
+    if (Store.prog.isEmpty) return;
+    final bool ok = await askConfirm(context, 'Limpar historico',
+        'Apagar TODO o historico de "Continuar Assistindo"?');
+    if (!ok) return;
+    await Store.clearProgress();
+  }
+
+  Future<void> _clearFavs() async {
+    if (Store.favs.isEmpty) return;
+    final bool ok = await askConfirm(context, 'Apagar favoritos',
+        'Remover TODOS os titulos da sua lista de favoritos?');
+    if (!ok) return;
+    await Store.clearFavs();
+  }
+
+  Future<void> _sair() async {
+    final bool ok =
+        await askConfirm(context, 'Sair da conta', 'Deseja sair de ${Store.user}?');
+    if (!ok) return;
+    await Store.persist();
+    await widget.onLogout();
+  }
+
+  void _menu(String v) {
+    switch (v) {
+      case 'backup':
+        _backup();
+        break;
+      case 'hist':
+        _clearHist();
+        break;
+      case 'favs':
+        _clearFavs();
+        break;
+      case 'sair':
+        _sair();
+        break;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: kBg,
+      appBar: AppBar(
+        backgroundColor: kBg,
+        elevation: 0,
+        titleSpacing: 14,
+        title: Row(
+          children: <Widget>[
+            const TmcLogo(size: 28),
+            const SizedBox(width: 10),
+            const Text('TMC',
+                style:
+                    TextStyle(fontWeight: FontWeight.w800, letterSpacing: 2)),
+          ],
+        ),
+        actions: <Widget>[
+          IconButton(
+            tooltip: 'Buscar',
+            onPressed: _search,
+            icon: const Icon(Icons.search),
+          ),
+          IconButton(
+            tooltip: 'Limpar cache',
+            onPressed: _clean,
+            icon: const Icon(Icons.cleaning_services_outlined),
+          ),
+          PopupMenuButton<String>(
+            tooltip: 'Conta',
+            icon: const Icon(Icons.account_circle_outlined),
+            onSelected: _menu,
+            itemBuilder: (BuildContext c) => <PopupMenuEntry<String>>[
+              PopupMenuItem<String>(
+                enabled: false,
+                value: 'x',
+                child: Text('Conta: ${Store.user}',
+                    style: const TextStyle(
+                        fontWeight: FontWeight.w700, color: kGold)),
+              ),
+              const PopupMenuDivider(),
+              const PopupMenuItem<String>(
+                value: 'backup',
+                child: ListTile(
+                  dense: true,
+                  leading: Icon(Icons.save_alt),
+                  title: Text('Backup do perfil'),
+                ),
+              ),
+              const PopupMenuItem<String>(
+                value: 'hist',
+                child: ListTile(
+                  dense: true,
+                  leading: Icon(Icons.history),
+                  title: Text('Limpar todo o historico'),
+                ),
+              ),
+              const PopupMenuItem<String>(
+                value: 'favs',
+                child: ListTile(
+                  dense: true,
+                  leading: Icon(Icons.favorite_border),
+                  title: Text('Apagar todos os favoritos'),
+                ),
+              ),
+              const PopupMenuDivider(),
+              const PopupMenuItem<String>(
+                value: 'sair',
+                child: ListTile(
+                  dense: true,
+                  leading: Icon(Icons.logout),
+                  title: Text('Sair da conta'),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(width: 6),
+        ],
+        bottom: TabBar(
+          controller: _tabs,
+          isScrollable: true,
+          tabAlignment: TabAlignment.start,
+          labelColor: kGold,
+          unselectedLabelColor: Colors.white60,
+          indicatorColor: kGold,
+          labelStyle: const TextStyle(
+              fontWeight: FontWeight.w800, fontSize: 12, letterSpacing: 0.6),
+          tabs: _labels
+              .map((String t) => Tab(height: 42, text: t))
+              .toList(),
+        ),
+      ),
+      body: TabBarView(
+        controller: _tabs,
+        physics: const BouncingScrollPhysics(),
+        children: _pages,
+      ),
+    );
+  }
+}
+
+// ============================== INICIO ===============================
+class HomeTab extends StatefulWidget {
+  const HomeTab({super.key});
+  @override
+  State<HomeTab> createState() => _HomeTabState();
+}
+
+class _HomeTabState extends State<HomeTab> {
   bool _loading = true;
-  String? _err;
+  String _err = '';
   MediaItem? _hero;
   List<MediaItem> _trending = <MediaItem>[];
   List<MediaItem> _movies = <MediaItem>[];
-  List<MediaItem> _topMovies = <MediaItem>[];
   List<MediaItem> _series = <MediaItem>[];
   List<MediaItem> _novelas = <MediaItem>[];
   List<MediaItem> _dramas = <MediaItem>[];
+  List<MediaItem> _kids = <MediaItem>[];
   List<MediaItem> _action = <MediaItem>[];
-  List<MediaItem> _anim = <MediaItem>[];
   List<WatchItem> _cont = <WatchItem>[];
   List<MediaItem> _favs = <MediaItem>[];
 
   @override
   void initState() {
     super.initState();
-    Store.revision.addListener(_localRefresh);
-    _localRefresh();
-    _load();
+    Store.revision.addListener(_local);
+    _local();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _load());
   }
 
   @override
   void dispose() {
-    Store.revision.removeListener(_localRefresh);
+    Store.revision.removeListener(_local);
     super.dispose();
   }
 
-  void _localRefresh() {
+  void _local() {
     if (!mounted) return;
     setState(() {
       _cont = Store.continueWatching();
-      _favs = Store.favorites();
+      _favs = Store.favs;
     });
   }
 
@@ -896,14 +1915,15 @@ class _HomeScreenState extends State<HomeScreen> {
     if (!mounted) return;
     setState(() {
       _loading = true;
-      _err = null;
+      _err = '';
     });
 
     if (!TmdbService.ok) {
+      if (!mounted) return;
       setState(() {
         _loading = false;
         _err =
-            'Cole a sua chave do TMDB na variavel tmdbApiKey (topo do lib/main.dart)';
+            'Cole a sua chave do TMDB na variavel tmdbApiKey (topo do lib/main.dart).';
       });
       return;
     }
@@ -917,30 +1937,28 @@ class _HomeScreenState extends State<HomeScreen> {
         TmdbService.popularTv(pages: 3),
         TmdbService.novelas(pages: 2),
         TmdbService.shortDramas(pages: 2),
-        TmdbService.actionMovies(pages: 1),
-        TmdbService.animations(pages: 1),
+        TmdbService.kidsMovies(pages: 2),
+        TmdbService.actionMovies(pages: 2),
       ]);
       if (!mounted) return;
       setState(() {
         _trending = r[0];
         _movies = r[1];
-        _topMovies = r[2];
         _series = r[3];
         _novelas = r[4];
         _dramas = r[5];
-        _action = r[6];
-        _anim = r[7];
+        _kids = r[6];
+        _action = r[7];
         _hero = _pickHero(_trending);
         _loading = false;
       });
-      _localRefresh();
+      _local();
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          _err = e.toString();
-          _loading = false;
-        });
-      }
+      if (!mounted) return;
+      setState(() {
+        _err = e.toString();
+        _loading = false;
+      });
     }
   }
 
@@ -951,113 +1969,91 @@ class _HomeScreenState extends State<HomeScreen> {
     return list.isEmpty ? null : list.first;
   }
 
-  void _openSearch() {
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(builder: (_) => const SearchScreen()),
-    );
+  Future<void> _clearFavs() async {
+    if (_favs.isEmpty) return;
+    final bool ok = await askConfirm(context, 'Apagar favoritos',
+        'Remover TODOS os titulos dos favoritos?');
+    if (!ok) return;
+    await Store.clearFavs();
+  }
+
+  Future<void> _clearHist() async {
+    if (_cont.isEmpty) return;
+    final bool ok = await askConfirm(context, 'Limpar historico',
+        'Apagar TODO o historico de "Continuar Assistindo"?');
+    if (!ok) return;
+    await Store.clearProgress();
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: kBg,
-      body: SafeArea(
-        bottom: false,
-        child: RefreshIndicator(
-          onRefresh: _load,
-          color: kGold,
-          backgroundColor: kSurface,
-          child: CustomScrollView(
-            physics: const AlwaysScrollableScrollPhysics(),
-            slivers: <Widget>[
-              SliverAppBar(
-                floating: true,
-                backgroundColor: kBg,
-                elevation: 0,
-                titleSpacing: 16,
-                title: Row(
-                  children: <Widget>[
-                    const TmcLogo(size: 30),
-                    const SizedBox(width: 10),
-                    const Text('TMC',
-                        style: TextStyle(
-                            fontWeight: FontWeight.w800, letterSpacing: 2)),
-                  ],
-                ),
-                actions: <Widget>[
-                  IconButton(
-                    tooltip: 'Atualizar',
-                    onPressed: _load,
-                    icon: const Icon(Icons.refresh),
-                  ),
-                  IconButton(
-                    tooltip: 'Buscar',
-                    onPressed: _openSearch,
-                    icon: const Icon(Icons.search),
-                  ),
-                  const SizedBox(width: 6),
-                ],
+    return RefreshIndicator(
+      onRefresh: _load,
+      color: kGold,
+      backgroundColor: kSurface,
+      child: CustomScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        slivers: <Widget>[
+          if (_loading)
+            const SliverToBoxAdapter(
+              child: Padding(
+                padding: EdgeInsets.symmetric(vertical: 70),
+                child: Center(child: CircularProgressIndicator()),
               ),
-              if (_loading)
-                const SliverToBoxAdapter(
-                  child: Padding(
-                    padding: EdgeInsets.symmetric(vertical: 60),
-                    child: Center(child: CircularProgressIndicator()),
-                  ),
-                )
-              else if (_err != null)
-                SliverToBoxAdapter(child: _errorBox())
-              else ...<Widget>[
-                if (_hero != null)
-                  SliverToBoxAdapter(child: HeroBanner(item: _hero!)),
-                SliverToBoxAdapter(
-                  child: ContinueRow(items: _cont, onChanged: _localRefresh),
-                ),
-                SliverToBoxAdapter(
-                  child: MediaRow(title: 'Meus Favoritos', items: _favs),
-                ),
-                SliverToBoxAdapter(
-                  child: MediaRow(title: 'Filmes em Destaque', items: _movies),
-                ),
-                SliverToBoxAdapter(
-                  child: MediaRow(title: 'SÃ©ries em Alta', items: _series),
-                ),
-                SliverToBoxAdapter(
-                  child: MediaRow(title: 'Novelas', items: _novelas),
-                ),
-                SliverToBoxAdapter(
-                  child: MediaRow(title: 'Dramas Curtos', items: _dramas),
-                ),
-                SliverToBoxAdapter(
-                  child:
-                      MediaRow(title: 'Tendencias da Semana', items: _trending),
-                ),
-                SliverToBoxAdapter(
-                  child: MediaRow(title: 'Aclamados', items: _topMovies),
-                ),
-                SliverToBoxAdapter(
-                  child: MediaRow(title: 'Acao e Aventura', items: _action),
-                ),
-                SliverToBoxAdapter(
-                  child: MediaRow(title: 'Animacao', items: _anim),
-                ),
-                const SliverToBoxAdapter(child: SizedBox(height: 40)),
-              ],
-            ],
-          ),
-        ),
+            )
+          else if (_err.isNotEmpty)
+            SliverToBoxAdapter(child: _errorBox())
+          else ...<Widget>[
+            if (_hero != null)
+              SliverToBoxAdapter(child: HeroBanner(item: _hero!)),
+            SliverToBoxAdapter(
+              child: ContinueRow(items: _cont, onChanged: _local, onClear: _clearHist),
+            ),
+            SliverToBoxAdapter(
+              child: MediaRow(
+                title: 'Meus Favoritos',
+                items: _favs,
+                removable: true,
+                onRemove: (MediaItem m) => Store.removeFav(m.key),
+                onClear: _clearFavs,
+              ),
+            ),
+            SliverToBoxAdapter(
+              child: MediaRow(title: 'Filmes em Destaque', items: _movies),
+            ),
+            SliverToBoxAdapter(
+              child: MediaRow(title: 'Series em Alta', items: _series),
+            ),
+            SliverToBoxAdapter(
+              child: MediaRow(title: 'Novelas', items: _novelas),
+            ),
+            SliverToBoxAdapter(
+              child: MediaRow(title: 'Dramas Curtos', items: _dramas),
+            ),
+            SliverToBoxAdapter(
+              child: MediaRow(title: 'Kids e Animacao', items: _kids),
+            ),
+            SliverToBoxAdapter(
+              child: MediaRow(title: 'Tendencias da Semana', items: _trending),
+            ),
+            SliverToBoxAdapter(
+              child: MediaRow(title: 'Acao e Aventura', items: _action),
+            ),
+            const SliverToBoxAdapter(child: SizedBox(height: 90)),
+          ],
+        ],
       ),
     );
   }
 
   Widget _errorBox() {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 60, 20, 20),
+      padding: const EdgeInsets.fromLTRB(20, 70, 20, 20),
       child: Column(
         children: <Widget>[
           const Icon(Icons.cloud_off, size: 54, color: kGold),
           const SizedBox(height: 14),
-          Text(_err!,
+          Text(_err,
               textAlign: TextAlign.center,
               style: const TextStyle(color: Colors.white70)),
           const SizedBox(height: 18),
@@ -1094,7 +2090,7 @@ class _HeroBannerState extends State<HeroBanner> {
   Widget build(BuildContext context) {
     final MediaItem item = widget.item;
     final double h =
-        (MediaQuery.of(context).size.height * 0.62).clamp(340.0, 640.0);
+        (MediaQuery.of(context).size.height * 0.6).clamp(320.0, 620.0);
 
     return SizedBox(
       height: h,
@@ -1123,7 +2119,7 @@ class _HeroBannerState extends State<HeroBanner> {
           Positioned(
             left: 18,
             right: 18,
-            bottom: 20,
+            bottom: 18,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
@@ -1158,10 +2154,7 @@ class _HeroBannerState extends State<HeroBanner> {
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
-                    fontSize: 30,
-                    height: 1.05,
-                    fontWeight: FontWeight.w900,
-                  ),
+                      fontSize: 30, height: 1.05, fontWeight: FontWeight.w900),
                 ),
                 const SizedBox(height: 8),
                 Row(
@@ -1251,12 +2244,18 @@ class MediaRow extends StatelessWidget {
   final String title;
   final List<MediaItem> items;
   final double height;
+  final bool removable;
+  final void Function(MediaItem item)? onRemove;
+  final Future<void> Function()? onClear;
 
   const MediaRow({
     super.key,
     required this.title,
     required this.items,
-    this.height = 214,
+    this.height = 218,
+    this.removable = false,
+    this.onRemove,
+    this.onClear,
   });
 
   @override
@@ -1266,7 +2265,7 @@ class MediaRow extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
         Padding(
-          padding: const EdgeInsets.fromLTRB(18, 22, 18, 10),
+          padding: const EdgeInsets.fromLTRB(18, 20, 10, 8),
           child: Row(
             children: <Widget>[
               Container(
@@ -1287,8 +2286,20 @@ class MediaRow extends StatelessWidget {
                       fontSize: 17, fontWeight: FontWeight.w700),
                 ),
               ),
-              Text('${items.length}',
-                  style: const TextStyle(fontSize: 11, color: Colors.white38)),
+              if (onClear != null)
+                TextButton(
+                  onPressed: () {
+                    final Future<void> Function()? f = onClear;
+                    if (f != null) f();
+                  },
+                  child: const Text('LIMPAR',
+                      style: TextStyle(fontSize: 11, color: kGold)),
+                )
+              else
+                Text('${items.length}',
+                    style:
+                        const TextStyle(fontSize: 11, color: Colors.white38)),
+              const SizedBox(width: 6),
             ],
           ),
         ),
@@ -1298,8 +2309,16 @@ class MediaRow extends StatelessWidget {
             scrollDirection: Axis.horizontal,
             padding: const EdgeInsets.symmetric(horizontal: 12),
             itemCount: items.length,
-            itemBuilder: (BuildContext context, int i) =>
-                PosterCard(item: items[i], width: 134),
+            itemBuilder: (BuildContext context, int i) => PosterCard(
+              item: items[i],
+              width: 134,
+              onRemove: removable && onRemove != null
+                  ? () {
+                      final void Function(MediaItem)? f = onRemove;
+                      if (f != null) f(items[i]);
+                    }
+                  : null,
+            ),
           ),
         ),
       ],
@@ -1310,8 +2329,14 @@ class MediaRow extends StatelessWidget {
 class ContinueRow extends StatelessWidget {
   final List<WatchItem> items;
   final VoidCallback onChanged;
+  final Future<void> Function()? onClear;
 
-  const ContinueRow({super.key, required this.items, required this.onChanged});
+  const ContinueRow({
+    super.key,
+    required this.items,
+    required this.onChanged,
+    this.onClear,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -1320,7 +2345,7 @@ class ContinueRow extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
         Padding(
-          padding: const EdgeInsets.fromLTRB(18, 22, 18, 10),
+          padding: const EdgeInsets.fromLTRB(18, 20, 10, 8),
           child: Row(
             children: <Widget>[
               Container(
@@ -1332,8 +2357,21 @@ class ContinueRow extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 10),
-              const Text('Continuar Assistindo',
-                  style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700)),
+              const Expanded(
+                child: Text('Continuar Assistindo',
+                    style:
+                        TextStyle(fontSize: 17, fontWeight: FontWeight.w700)),
+              ),
+              if (onClear != null)
+                TextButton(
+                  onPressed: () {
+                    final Future<void> Function()? f = onClear;
+                    if (f != null) f();
+                  },
+                  child: const Text('LIMPAR',
+                      style: TextStyle(fontSize: 11, color: kGold)),
+                ),
+              const SizedBox(width: 6),
             ],
           ),
         ),
@@ -1365,6 +2403,11 @@ class _ContinueCard extends StatefulWidget {
 class _ContinueCardState extends State<_ContinueCard> {
   bool _focused = false;
 
+  Future<void> _remove() async {
+    await Store.removeProgress(widget.item.key);
+    widget.onChanged();
+  }
+
   @override
   Widget build(BuildContext context) {
     final WatchItem w = widget.item;
@@ -1380,6 +2423,7 @@ class _ContinueCardState extends State<_ContinueCard> {
           clipBehavior: Clip.antiAlias,
           child: InkWell(
             onFocusChange: (bool v) => setState(() => _focused = v),
+            onLongPress: _remove,
             onTap: () async {
               await openPlayer(context, w.media,
                   season: w.season, episode: w.episode);
@@ -1421,15 +2465,13 @@ class _ContinueCardState extends State<_ContinueCard> {
                       Positioned(
                         top: 6,
                         right: 6,
-                        child: InkWell(
-                          onTap: () async {
-                            await Store.removeProgress(w.key);
-                            widget.onChanged();
-                          },
+                        child: GestureDetector(
+                          onTap: _remove,
                           child: Container(
                             padding: const EdgeInsets.all(3),
                             decoration: const BoxDecoration(
-                                color: Colors.black54, shape: BoxShape.circle),
+                                color: Colors.black54,
+                                shape: BoxShape.circle),
                             child: const Icon(Icons.close, size: 14),
                           ),
                         ),
@@ -1460,7 +2502,7 @@ class _ContinueCardState extends State<_ContinueCard> {
                               fontSize: 12.5, fontWeight: FontWeight.w700)),
                       const SizedBox(height: 2),
                       Text(
-                        '${w.label}  â€¢  ${_fmtSeg(w.position)}',
+                        '${w.label} - ${_fmtSeg(w.position)}',
                         style: const TextStyle(
                             fontSize: 10.5, color: Colors.white54),
                       ),
@@ -1476,26 +2518,19 @@ class _ContinueCardState extends State<_ContinueCard> {
   }
 }
 
-String _fmtSeg(int seconds) {
-  final int h = seconds ~/ 3600;
-  final int m = (seconds % 3600) ~/ 60;
-  final int s = seconds % 60;
-  final String mm = m.toString().padLeft(2, '0');
-  final String ss = s.toString().padLeft(2, '0');
-  return h > 0 ? '$h:$mm:$ss' : '$mm:$ss';
-}
-
 // ============================= CARD ==================================
 class PosterCard extends StatefulWidget {
   final MediaItem item;
   final bool autofocus;
   final double? width;
+  final VoidCallback? onRemove;
 
   const PosterCard({
     super.key,
     required this.item,
     this.autofocus = false,
     this.width,
+    this.onRemove,
   });
 
   @override
@@ -1522,6 +2557,7 @@ class _PosterCardState extends State<PosterCard> {
           autofocus: widget.autofocus,
           onFocusChange: (bool v) => setState(() => _focused = v),
           onTap: _open,
+          onLongPress: widget.onRemove,
           borderRadius: BorderRadius.circular(12),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -1562,6 +2598,22 @@ class _PosterCardState extends State<PosterCard> {
                             ),
                           ),
                         ),
+                        if (widget.onRemove != null)
+                          Positioned(
+                            top: 6,
+                            left: 6,
+                            child: GestureDetector(
+                              onTap: widget.onRemove,
+                              child: Container(
+                                padding: const EdgeInsets.all(3),
+                                decoration: const BoxDecoration(
+                                    color: Colors.black87,
+                                    shape: BoxShape.circle),
+                                child: const Icon(Icons.close,
+                                    size: 13, color: Colors.white),
+                              ),
+                            ),
+                          ),
                       ],
                     ),
                   ),
@@ -1572,13 +2624,13 @@ class _PosterCardState extends State<PosterCard> {
                 widget.item.title,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style:
-                    const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600),
+                style: const TextStyle(
+                    fontSize: 11.5, fontWeight: FontWeight.w600),
               ),
               Text(
                 widget.item.year.isEmpty
                     ? widget.item.typeLabel
-                    : '${widget.item.year}  â€¢  ${widget.item.typeLabel}',
+                    : '${widget.item.year} - ${widget.item.typeLabel}',
                 maxLines: 1,
                 style: const TextStyle(fontSize: 10, color: Colors.white38),
               ),
@@ -1624,88 +2676,454 @@ class _PosterCardState extends State<PosterCard> {
   }
 }
 
-class ItemGrid extends StatelessWidget {
-  final List<MediaItem> items;
+// ========================= ABA INFINITA ==============================
+class DiscoverTab extends StatefulWidget {
+  final List<GenreChip> chips;
+  final Map<String, String> base;
   final String empty;
 
-  const ItemGrid({
+  const DiscoverTab({
     super.key,
-    required this.items,
+    required this.chips,
+    required this.base,
     this.empty = 'Nada por aqui ainda.',
   });
 
   @override
+  State<DiscoverTab> createState() => _DiscoverTabState();
+}
+
+class _DiscoverTabState extends State<DiscoverTab> {
+  int _g = 0;
+
+  Future<List<MediaItem>> _load(int page) {
+    final GenreChip g = widget.chips[_g];
+    final Map<String, String> q = <String, String>{
+      'sort_by': 'popularity.desc',
+      'include_adult': 'false',
+      'vote_count.gte': '8',
+      ...widget.base,
+      ...g.extra,
+    };
+    if (g.withGenres.isNotEmpty) q['with_genres'] = g.withGenres;
+    return TmdbService.page(g.path, g.path.contains('/tv'), page, q);
+  }
+
+  @override
   Widget build(BuildContext context) {
-    if (items.isEmpty) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Text(empty,
-              textAlign: TextAlign.center,
-              style: const TextStyle(color: Colors.white54)),
-        ),
-      );
-    }
-    return LayoutBuilder(
-      builder: (BuildContext context, BoxConstraints c) {
-        final int cols = (c.maxWidth / 140).floor().clamp(2, 8).toInt();
-        return GridView.builder(
-          padding: const EdgeInsets.all(14),
-          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: cols,
-            childAspectRatio: 0.56,
-            crossAxisSpacing: 12,
-            mainAxisSpacing: 12,
+    final GenreChip g = widget.chips[_g];
+    return Column(
+      children: <Widget>[
+        SizedBox(
+          height: 50,
+          child: ListView.builder(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            itemCount: widget.chips.length,
+            itemBuilder: (BuildContext c, int i) {
+              final bool on = i == _g;
+              return Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: ChoiceChip(
+                  selected: on,
+                  label: Text(widget.chips[i].label,
+                      style: const TextStyle(fontSize: 11.5)),
+                  selectedColor: kGold,
+                  onSelected: (bool _) {
+                    if (_g == i) return;
+                    setState(() => _g = i);
+                  },
+                ),
+              );
+            },
           ),
-          itemCount: items.length,
-          itemBuilder: (BuildContext context, int i) =>
-              PosterCard(item: items[i], autofocus: i == 0),
-        );
-      },
+        ),
+        Expanded(
+          child: InfiniteGrid(
+            key: ValueKey<String>(
+                '${g.label}|${g.path}|${g.withGenres}|${g.extra.length}'),
+            loader: _load,
+            empty: widget.empty,
+          ),
+        ),
+      ],
     );
   }
 }
 
-// =========================== FAVORITOS ===============================
-class FavoritesScreen extends StatefulWidget {
-  const FavoritesScreen({super.key});
+class InfiniteGrid extends StatefulWidget {
+  final Future<List<MediaItem>> Function(int page) loader;
+  final String empty;
+
+  const InfiniteGrid({super.key, required this.loader, this.empty = 'Nada por aqui ainda.'});
+
   @override
-  State<FavoritesScreen> createState() => _FavoritesScreenState();
+  State<InfiniteGrid> createState() => _InfiniteGridState();
 }
 
-class _FavoritesScreenState extends State<FavoritesScreen> {
-  List<MediaItem> _items = <MediaItem>[];
+class _InfiniteGridState extends State<InfiniteGrid> {
+  final ScrollController _ctl = ScrollController();
+  final List<MediaItem> _items = <MediaItem>[];
+  int _page = 0;
+  bool _busy = false;
+  bool _done = false;
+  bool _fail = false;
 
   @override
   void initState() {
     super.initState();
-    Store.revision.addListener(_refresh);
-    _refresh();
+    _ctl.addListener(_onScroll);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _more());
   }
 
   @override
   void dispose() {
-    Store.revision.removeListener(_refresh);
+    _ctl.removeListener(_onScroll);
+    _ctl.dispose();
     super.dispose();
   }
 
-  void _refresh() {
+  void _onScroll() {
+    if (!_ctl.hasClients) return;
+    if (_ctl.position.pixels >= _ctl.position.maxScrollExtent - 700) _more();
+  }
+
+  Future<void> _more() async {
+    if (_busy || _done || !mounted) return;
+    _busy = true;
+    final int next = _page + 1;
+    List<MediaItem> r = <MediaItem>[];
+    try {
+      r = await widget.loader(next);
+    } catch (_) {
+      r = <MediaItem>[];
+    }
     if (!mounted) return;
-    setState(() => _items = Store.favorites());
+    setState(() {
+      _page = next;
+      final Set<String> seen = _items.map((MediaItem m) => m.key).toSet();
+      for (final MediaItem m in r) {
+        if (seen.add(m.key)) _items.add(m);
+      }
+      if (r.length < 10) _done = true;
+      _fail = _items.isEmpty && r.isEmpty;
+      _busy = false;
+    });
+  }
+
+  Future<void> _reset() async {
+    if (!mounted) return;
+    setState(() {
+      _items.clear();
+      _page = 0;
+      _done = false;
+      _busy = false;
+      _fail = false;
+    });
+    await _more();
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: kBg,
-      appBar: AppBar(
-        title: const Text('Meus Favoritos',
-            style: TextStyle(fontWeight: FontWeight.w800)),
+    if (_items.isEmpty && _busy) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (_items.isEmpty && _done) {
+      return RefreshIndicator(
+        onRefresh: _reset,
+        color: kGold,
+        backgroundColor: kSurface,
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          children: <Widget>[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(24, 80, 24, 24),
+              child: Column(
+                children: <Widget>[
+                  Icon(_fail ? Icons.cloud_off : Icons.inbox_outlined,
+                      size: 46, color: Colors.white24),
+                  const SizedBox(height: 12),
+                  Text(_fail ? 'Falha ao carregar. Puxe para tentar de novo.' : widget.empty,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: Colors.white54)),
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return RefreshIndicator(
+      onRefresh: _reset,
+      color: kGold,
+      backgroundColor: kSurface,
+      child: GridView.builder(
+        controller: _ctl,
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(12, 10, 12, 90),
+        gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+          maxCrossAxisExtent: 162,
+          childAspectRatio: 0.54,
+          crossAxisSpacing: 12,
+          mainAxisSpacing: 14,
+        ),
+        itemCount: _items.length + 1,
+        itemBuilder: (BuildContext c, int i) {
+          if (i >= _items.length) return _footer();
+          return PosterCard(item: _items[i], autofocus: i == 0);
+        },
       ),
-      body: ItemGrid(
-        items: _items,
-        empty: 'Toque no coracao de um titulo para salvar aqui.',
+    );
+  }
+
+  Widget _footer() {
+    if (_done) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(12),
+          child: Text('FIM',
+              style: TextStyle(color: Colors.white24, fontSize: 11)),
+        ),
+      );
+    }
+    return const Center(
+      child: Padding(
+        padding: EdgeInsets.all(12),
+        child: SizedBox(
+          width: 22,
+          height: 22,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
       ),
+    );
+  }
+}
+
+// ============================ TV ONLINE ==============================
+// Edite/adicione canais livremente nesta lista (links .m3u8 estaveis).
+const List<Channel> kCanais = <Channel>[
+  Channel('TV Cultura', 'https://livecdn.cultura.uol.com.br/culturahd.m3u8'),
+  Channel('TV Brasil', 'https://tvbrasil-stream.ebc.com.br/hls/tvbrasil.m3u8'),
+  Channel('TV Senado',
+      'https://senadolive.akamaized.net/hls/live/2012036/senado/playlist.m3u8'),
+  Channel('Record News',
+      'https://playplusch.akamaized.net/hls/live/2012036/RecordNewsBrasil/playlist.m3u8',
+      'NOTICIAS'),
+  Channel('CNN Brasil',
+      'https://cnnbrazillh.akamaized.net/hls/live/2031480/cnnbrasil/index.m3u8',
+      'NOTICIAS'),
+  Channel('Band News',
+      'https://bandnewslh.akamaized.net/hls/live/2040008/bandnews/index.m3u8',
+      'NOTICIAS'),
+  Channel('Euronews PT',
+      'https://euronews-euronews-portuguese-1-eu.rakuten.wurl.tv/playlist.m3u8',
+      'INTERNACIONAIS'),
+  Channel('Red Bull TV',
+      'https://rbmn-live.akamaized.net/hls/live/590964/BoRB-AT/master.m3u8',
+      'ESPORTES'),
+  Channel('Caze TV',
+      'https://cazetvlh.akamaized.net/hls/live/2040459/cazetv/index.m3u8',
+      'ESPORTES'),
+  Channel('BandSports',
+      'https://bandsportslh.akamaized.net/hls/live/2036193/bandsports/index.m3u8',
+      'ESPORTES'),
+];
+
+class OnlineTvTab extends StatefulWidget {
+  const OnlineTvTab({super.key});
+  @override
+  State<OnlineTvTab> createState() => _OnlineTvTabState();
+}
+
+class _OnlineTvTabState extends State<OnlineTvTab> {
+  List<Channel> _meus = <Channel>[];
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _load());
+  }
+
+  void _load() {
+    String raw = '';
+    try {
+      raw = prefs.getString('tmc_ch_${Store.user}') ?? '';
+    } catch (_) {}
+    final List<Channel> out = <Channel>[];
+    if (raw.isNotEmpty) {
+      try {
+        final List<dynamic> l = jsonDecode(raw) as List<dynamic>;
+        for (final dynamic e in l) {
+          out.add(Channel.fromJson(
+              (e as Map<dynamic, dynamic>).cast<String, dynamic>()));
+        }
+      } catch (_) {}
+    }
+    if (mounted) setState(() => _meus = out);
+  }
+
+  Future<void> _save() async {
+    try {
+      await prefs.setString('tmc_ch_${Store.user}',
+          jsonEncode(_meus.map((Channel c) => c.toJson()).toList()));
+    } catch (_) {}
+  }
+
+  void _play(Channel c) {
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => PlayerScreen(
+        url: c.url,
+        title: c.name,
+        provider: 'TV ONLINE',
+        live: true,
+      ),
+    ));
+  }
+
+  Future<void> _add() async {
+    final TextEditingController n = TextEditingController();
+    final TextEditingController u = TextEditingController();
+    final bool? ok = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext ctx) => AlertDialog(
+        backgroundColor: kSurface,
+        title: const Text('Novo canal'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            TextField(
+              controller: n,
+              decoration: const InputDecoration(
+                  labelText: 'Nome do canal', border: OutlineInputBorder()),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: u,
+              decoration: const InputDecoration(
+                  labelText: 'Link .m3u8', border: OutlineInputBorder()),
+            ),
+          ],
+        ),
+        actions: <Widget>[
+          TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Cancelar')),
+          FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('Adicionar')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    if (n.text.trim().isEmpty || u.text.trim().isEmpty) return;
+    setState(() {
+      _meus = <Channel>[
+        Channel(n.text.trim(), u.text.trim(), 'MEUS CANAIS'),
+        ..._meus,
+      ];
+    });
+    await _save();
+  }
+
+  Future<void> _remove(Channel c) async {
+    final bool ok = await askConfirm(
+        context, 'Remover canal', 'Remover "${c.name}" da sua lista?');
+    if (!ok) return;
+    setState(() => _meus = _meus.where((Channel x) => x.url != c.url).toList());
+    await _save();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final List<Channel> todos = <Channel>[..._meus, ...kCanais];
+    final List<String> grupos = <String>[];
+    for (final Channel c in todos) {
+      if (!grupos.contains(c.group)) grupos.add(c.group);
+    }
+
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 90),
+      children: <Widget>[
+        Row(
+          children: <Widget>[
+            const Expanded(
+              child: Text('CANAIS AO VIVO',
+                  style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: 1)),
+            ),
+            FilledButton.icon(
+              onPressed: _add,
+              icon: const Icon(Icons.add, size: 16),
+              label: const Text('CANAL'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        for (final String g in grupos) ...<Widget>[
+          Padding(
+            padding: const EdgeInsets.fromLTRB(2, 12, 2, 8),
+            child: Text(g,
+                style: const TextStyle(
+                    fontSize: 11.5,
+                    color: kGold,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 1)),
+          ),
+          for (final Channel c in todos.where((Channel x) => x.group == g))
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Material(
+                color: kCard,
+                borderRadius: BorderRadius.circular(12),
+                clipBehavior: Clip.antiAlias,
+                child: InkWell(
+                  onTap: () => _play(c),
+                  onLongPress: c.group == 'MEUS CANAIS' ? () => _remove(c) : null,
+                  child: Padding(
+                    padding: const EdgeInsets.all(10),
+                    child: Row(
+                      children: <Widget>[
+                        Container(
+                          width: 42,
+                          height: 42,
+                          decoration: BoxDecoration(
+                            color: kSurface,
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: const Icon(Icons.live_tv, color: kGold),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: <Widget>[
+                              Text(c.name,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                      fontWeight: FontWeight.w700,
+                                      fontSize: 13.5)),
+                              Text(c.url,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                      fontSize: 10, color: Colors.white38)),
+                            ],
+                          ),
+                        ),
+                        const Icon(Icons.play_circle_fill,
+                            color: Colors.white70),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ],
     );
   }
 }
@@ -1749,9 +3167,11 @@ class _SearchScreenState extends State<SearchScreen> {
     }
     try {
       final List<MediaItem> r = await TmdbService.search(q, _isTv, pages: 2);
-      if (mounted) setState(() => _items = r);
+      if (!mounted) return;
+      setState(() => _items = r);
     } catch (_) {
-      if (mounted) setState(() => _items = <MediaItem>[]);
+      if (!mounted) return;
+      setState(() => _items = <MediaItem>[]);
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -1792,7 +3212,28 @@ class _SearchScreenState extends State<SearchScreen> {
                   child: Text('Digite algo para buscar.',
                       style: TextStyle(color: Colors.white54)),
                 )
-              : ItemGrid(items: _items, empty: 'Nada encontrado para "$_q".'),
+              : _grid(),
+    );
+  }
+
+  Widget _grid() {
+    if (_items.isEmpty) {
+      return Center(
+        child: Text('Nada encontrado para "$_q".',
+            style: const TextStyle(color: Colors.white54)),
+      );
+    }
+    return GridView.builder(
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 60),
+      gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+        maxCrossAxisExtent: 162,
+        childAspectRatio: 0.54,
+        crossAxisSpacing: 12,
+        mainAxisSpacing: 14,
+      ),
+      itemCount: _items.length,
+      itemBuilder: (BuildContext c, int i) =>
+          PosterCard(item: _items[i], autofocus: i == 0),
     );
   }
 }
@@ -1809,7 +3250,7 @@ class DetailsScreen extends StatefulWidget {
 class _DetailsScreenState extends State<DetailsScreen> {
   Map<String, dynamic>? _d;
   bool _loading = true;
-  String? _err;
+  String _err = '';
   bool _fav = false;
   bool _descFull = false;
   int _server = -1;
@@ -1825,7 +3266,7 @@ class _DetailsScreenState extends State<DetailsScreen> {
   void initState() {
     super.initState();
     _fav = Store.isFav(widget.item.key);
-    _load();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _load());
   }
 
   Future<void> _load() async {
@@ -1867,16 +3308,16 @@ class _DetailsScreenState extends State<DetailsScreen> {
         if (mounted) setState(() => _similar = sim);
       } catch (_) {}
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          _err = e.toString();
-          _loading = false;
-        });
-      }
+      if (!mounted) return;
+      setState(() {
+        _err = e.toString();
+        _loading = false;
+      });
     }
   }
 
   Future<void> _loadEpisodes() async {
+    if (!mounted) return;
     setState(() {
       _epLoading = true;
       _episodes = <Episode>[];
@@ -1884,9 +3325,11 @@ class _DetailsScreenState extends State<DetailsScreen> {
     try {
       final List<Episode> eps =
           await TmdbService.episodes(widget.item.id, _season);
-      if (mounted) setState(() => _episodes = eps);
+      if (!mounted) return;
+      setState(() => _episodes = eps);
     } catch (_) {
-      if (mounted) setState(() => _episodes = <Episode>[]);
+      if (!mounted) return;
+      setState(() => _episodes = <Episode>[]);
     } finally {
       if (mounted) setState(() => _epLoading = false);
     }
@@ -1961,7 +3404,9 @@ class _DetailsScreenState extends State<DetailsScreen> {
 
   Future<void> _verTrailer() async {
     String? key = TmdbService.findTrailer(_d);
-    key ??= await TmdbService.trailerKey(widget.item.id, _isTv);
+    if (key == null || key.isEmpty) {
+      key = await TmdbService.trailerKey(widget.item.id, _isTv);
+    }
     if (!mounted) return;
     if (key == null || key.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
@@ -1980,7 +3425,7 @@ class _DetailsScreenState extends State<DetailsScreen> {
         slivers: <Widget>[
           SliverAppBar(
             pinned: true,
-            expandedHeight: 330,
+            expandedHeight: 320,
             backgroundColor: kBg,
             flexibleSpace: FlexibleSpaceBar(
               title: Text(item.title,
@@ -1996,8 +3441,9 @@ class _DetailsScreenState extends State<DetailsScreen> {
                     Image.network(
                       item.backdropUrl,
                       fit: BoxFit.cover,
-                      errorBuilder: (BuildContext c, Object e, StackTrace? s) =>
-                          Container(color: kSurface),
+                      errorBuilder:
+                          (BuildContext c, Object e, StackTrace? s) =>
+                              Container(color: kSurface),
                     ),
                   const DecoratedBox(
                     decoration: BoxDecoration(
@@ -2032,10 +3478,10 @@ class _DetailsScreenState extends State<DetailsScreen> {
         ),
       );
     }
-    if (_err != null) {
+    if (_err.isNotEmpty) {
       return Column(
         children: <Widget>[
-          Text(_err!,
+          Text(_err,
               textAlign: TextAlign.center,
               style: const TextStyle(color: kGold)),
           const SizedBox(height: 14),
@@ -2043,7 +3489,7 @@ class _DetailsScreenState extends State<DetailsScreen> {
             onPressed: () {
               setState(() {
                 _loading = true;
-                _err = null;
+                _err = '';
               });
               _load();
             },
@@ -2071,7 +3517,7 @@ class _DetailsScreenState extends State<DetailsScreen> {
           spacing: 8,
           runSpacing: 8,
           children: <Widget>[
-            _chip('â˜… ${item.rating.toStringAsFixed(1)}', kGold),
+            _chip('* ${item.rating.toStringAsFixed(1)}', kGold),
             if (item.year.isNotEmpty) _chip(item.year, Colors.white70),
             _chip(item.typeLabel, Colors.white70),
             if (runtime.isNotEmpty) _chip(runtime, Colors.white70),
@@ -2133,12 +3579,13 @@ class _DetailsScreenState extends State<DetailsScreen> {
                 genres.map((String g) => _chip(g, Colors.white70)).toList(),
           ),
         ],
-        const SizedBox(height: 10),
+        const SizedBox(height: 12),
         const Text('Servidor:',
             style: TextStyle(color: Colors.white54, fontSize: 12)),
         const SizedBox(height: 6),
         Wrap(
           spacing: 8,
+          runSpacing: 8,
           children: <Widget>[
             _serverChip(-1, 'AUTOMATICO'),
             for (int i = 0; i < kProviders.length; i++)
@@ -2167,7 +3614,7 @@ class _DetailsScreenState extends State<DetailsScreen> {
           const SizedBox(height: 10),
           MediaRow(title: 'Parecidos com este', items: _similar),
         ],
-        const SizedBox(height: 40),
+        const SizedBox(height: 60),
       ],
     );
   }
@@ -2178,10 +3625,7 @@ class _DetailsScreenState extends State<DetailsScreen> {
     final Map<String, dynamic>? cr = d['credits'] as Map<String, dynamic>?;
     final List<dynamic> raw =
         (cr?['cast'] as List<dynamic>?) ?? const <dynamic>[];
-    return raw
-        .take(16)
-        .map((dynamic e) => e as Map<String, dynamic>)
-        .toList();
+    return raw.take(16).map((dynamic e) => e as Map<String, dynamic>).toList();
   }
 
   Widget _castSection() {
@@ -2252,8 +3696,8 @@ class _DetailsScreenState extends State<DetailsScreen> {
             final int c = s['c'] as int;
             return DropdownMenuItem<int>(
               value: n,
-              child: Text('$name  ($c cap.)',
-                  style: const TextStyle(fontSize: 13)),
+              child:
+                  Text('$name  ($c cap.)', style: const TextStyle(fontSize: 13)),
             );
           }).toList(),
           onChanged: (int? v) async {
@@ -2397,6 +3841,7 @@ class PlayerScreen extends StatefulWidget {
   final MediaItem? media;
   final int season;
   final int episode;
+  final bool live;
 
   const PlayerScreen({
     super.key,
@@ -2407,6 +3852,7 @@ class PlayerScreen extends StatefulWidget {
     this.media,
     this.season = 1,
     this.episode = 1,
+    this.live = false,
   });
 
   @override
@@ -2416,47 +3862,94 @@ class PlayerScreen extends StatefulWidget {
 class _PlayerScreenState extends State<PlayerScreen> {
   VideoPlayerController? _c;
   bool _ready = false;
-  String? _err;
+  bool _busy = true;
+  String _err = '';
   bool _ui = true;
   Timer? _hide;
   Timer? _saver;
+  Timer? _watch;
+  List<HlsVariant> _variants = <HlsVariant>[];
+  bool _auto = true;
+  bool _degraded = false;
+  int _stall = 0;
+  int _lastPos = -1;
+  String _qualityLabel = 'AUTO';
 
   String get _key {
     final MediaItem? m = widget.media;
-    if (m == null) return 'generic_${widget.title}';
-    return m.isTv
-        ? '${m.key}_${widget.season}_${widget.episode}'
-        : m.key;
+    if (m == null) return 'live_${widget.title}';
+    return m.isTv ? '${m.key}_${widget.season}_${widget.episode}' : m.key;
+  }
+
+  Map<String, String> get _headers {
+    final Map<String, String> h = <String, String>{'User-Agent': kUserAgent};
+    if (widget.referer.isNotEmpty) h['Referer'] = widget.referer;
+    return h;
   }
 
   @override
   void initState() {
     super.initState();
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-    SystemChrome.setPreferredOrientations(const <DeviceOrientation>[
-      DeviceOrientation.landscapeLeft,
-      DeviceOrientation.landscapeRight,
-      DeviceOrientation.portraitUp,
-    ]);
-    _start();
+    try {
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    } catch (_) {}
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _open(widget.url, first: true);
+    });
   }
 
-  Future<void> _start() async {
+  void _detach() {
+    final VideoPlayerController? c = _c;
+    _c = null;
+    if (c == null) return;
     try {
-      final Map<String, String> headers = <String, String>{
-        'User-Agent': kUserAgent,
-      };
-      if (widget.referer.isNotEmpty) headers['Referer'] = widget.referer;
+      c.removeListener(_tick);
+    } catch (_) {}
+    try {
+      c.dispose();
+    } catch (_) {}
+  }
 
-      final VideoPlayerController c = VideoPlayerController.networkUrl(
-        Uri.parse(widget.url),
-        httpHeaders: headers,
+  Future<void> _open(String url, {bool first = false}) async {
+    final VideoPlayerController? old = _c;
+    final int keep =
+        (old != null && old.value.isInitialized) ? old.value.position.inSeconds : 0;
+    _detach();
+    if (mounted) {
+      setState(() {
+        _busy = true;
+        _err = '';
+        _ready = false;
+      });
+    }
+
+    VideoPlayerController? c;
+    try {
+      c = VideoPlayerController.networkUrl(
+        Uri.parse(url),
+        httpHeaders: _headers,
         videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true),
       );
       await c.initialize();
       await c.setLooping(false);
+    } catch (e) {
+      try {
+        await c?.dispose();
+      } catch (_) {}
+      if (!mounted) return;
+      setState(() {
+        _err = e.toString();
+        _busy = false;
+      });
+      return;
+    }
 
-      // HLS adaptativo: o player negocia a faixa sozinho (Qualidade Automatica).
+    if (!mounted) {
+      await c.dispose();
+      return;
+    }
+
+    if (first && !widget.live) {
       final int saved = Store.seconds(_key);
       final int total = c.value.duration.inSeconds;
       if (saved > 15 && total > 0 && (total - saved) > 8) {
@@ -2471,21 +3964,73 @@ class _PlayerScreenState extends State<PlayerScreen> {
           await Store.removeProgress(_key);
         }
       }
+    } else if (keep > 3) {
+      try {
+        await c.seekTo(Duration(seconds: keep));
+      } catch (_) {}
+    }
 
+    try {
       await c.play();
-      if (!mounted) {
-        await c.dispose();
-        return;
-      }
-      c.addListener(_tick);
-      setState(() {
-        _c = c;
-        _ready = true;
-      });
-      _saver = Timer.periodic(const Duration(seconds: 5), (Timer _) => _save());
+    } catch (_) {}
+
+    if (!mounted) {
+      await c.dispose();
+      return;
+    }
+
+    c.addListener(_tick);
+    setState(() {
+      _c = c;
+      _ready = true;
+      _busy = false;
+    });
+
+    _saver ??= Timer.periodic(const Duration(seconds: 5), (Timer _) => _save());
+    _watch ??= Timer.periodic(const Duration(seconds: 2), (Timer _) => _check());
+    if (first) {
       _scheduleHide();
-    } catch (e) {
-      if (mounted) setState(() => _err = e.toString());
+      _loadVariants();
+    }
+  }
+
+  Future<void> _loadVariants() async {
+    if (widget.live || !widget.url.contains('.m3u8')) return;
+    final List<HlsVariant> v = await Hls.variants(widget.url, _headers);
+    if (!mounted) return;
+    if (v.isNotEmpty) setState(() => _variants = v);
+  }
+
+  Future<void> _switchTo(HlsVariant v, {bool auto = false}) async {
+    if (mounted) {
+      setState(() {
+        _auto = auto;
+        _qualityLabel = auto ? 'AUTO' : v.label;
+      });
+    }
+    await _open(v.url);
+  }
+
+  /// Qualidade automatica: se a rede engasgar, cai para a faixa mais leve.
+  void _check() {
+    final VideoPlayerController? c = _c;
+    if (c == null || !c.value.isInitialized) return;
+    final int p = c.value.position.inSeconds;
+    if (c.value.isBuffering || (c.value.isPlaying && p == _lastPos)) {
+      _stall++;
+    } else {
+      _stall = 0;
+    }
+    _lastPos = p;
+    if (_stall >= 3 && _auto && !_degraded && _variants.length > 1) {
+      _degraded = true;
+      _stall = 0;
+      _switchTo(_variants.first, auto: true);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            duration: Duration(seconds: 2),
+            content: Text('Rede instavel: qualidade automatica reduzida.')));
+      }
     }
   }
 
@@ -2493,31 +4038,31 @@ class _PlayerScreenState extends State<PlayerScreen> {
     final bool? r = await showDialog<bool>(
       context: context,
       barrierDismissible: false,
-      builder: (BuildContext ctx) {
-        return AlertDialog(
-          backgroundColor: kSurface,
-          title: const Text('Continuar de onde parou?'),
-          content: Text(
-            'Voce parou em ${_fmtSeg(seconds)}. Deseja retomar deste ponto?',
-            style: const TextStyle(color: Colors.white70),
+      builder: (BuildContext ctx) => AlertDialog(
+        backgroundColor: kSurface,
+        title: const Text('Continuar de onde parou?'),
+        content: Text(
+          'Voce parou em ${_fmtSeg(seconds)}. Deseja retomar deste ponto?',
+          style: const TextStyle(color: Colors.white70),
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Comecar do inicio'),
           ),
-          actions: <Widget>[
-            TextButton(
-              onPressed: () => Navigator.of(ctx).pop(false),
-              child: const Text('Comecar do inicio'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.of(ctx).pop(true),
-              child: const Text('Continuar'),
-            ),
-          ],
-        );
-      },
+          FilledButton(
+            autofocus: true,
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Continuar'),
+          ),
+        ],
+      ),
     );
     return r ?? false;
   }
 
   void _save() {
+    if (widget.live) return;
     final VideoPlayerController? c = _c;
     final MediaItem? m = widget.media;
     if (c == null || m == null || !c.value.isInitialized) return;
@@ -2554,14 +4099,17 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _save();
     _hide?.cancel();
     _saver?.cancel();
-    _c?.removeListener(_tick);
-    _c?.dispose();
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-    SystemChrome.setPreferredOrientations(const <DeviceOrientation>[
-      DeviceOrientation.portraitUp,
-      DeviceOrientation.landscapeLeft,
-      DeviceOrientation.landscapeRight,
-    ]);
+    _watch?.cancel();
+    _detach();
+    CacheKeeper.wipe();
+    try {
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+      SystemChrome.setPreferredOrientations(const <DeviceOrientation>[
+        DeviceOrientation.portraitUp,
+        DeviceOrientation.landscapeLeft,
+        DeviceOrientation.landscapeRight,
+      ]);
+    } catch (_) {}
     super.dispose();
   }
 
@@ -2592,11 +4140,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
               Center(child: _surface(c)),
               AnimatedOpacity(
                 opacity: _ui ? 1 : 0,
-                duration: const Duration(milliseconds: 200),
-                child: IgnorePointer(
-                  ignoring: !_ui,
-                  child: _overlay(c),
-                ),
+                duration: const Duration(milliseconds: 180),
+                child: IgnorePointer(ignoring: !_ui, child: _overlay(c)),
               ),
             ],
           ),
@@ -2606,12 +4151,15 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   Widget _surface(VideoPlayerController? c) {
-    if (_err != null) return _errorBox();
-    if (!_ready || c == null) return const CircularProgressIndicator();
-    return AspectRatio(
-      aspectRatio: c.value.aspectRatio,
-      child: VideoPlayer(c),
-    );
+    if (_err.isNotEmpty) return _errorBox();
+    if (_busy || c == null || !_ready) {
+      return const SizedBox(
+        width: 46,
+        height: 46,
+        child: CircularProgressIndicator(),
+      );
+    }
+    return AspectRatio(aspectRatio: c.value.aspectRatio, child: VideoPlayer(c));
   }
 
   Widget _errorBox() {
@@ -2625,21 +4173,25 @@ class _PlayerScreenState extends State<PlayerScreen> {
           const Text('Falha ao abrir o stream direto.',
               textAlign: TextAlign.center),
           const SizedBox(height: 6),
-          Text(_err ?? '',
+          Text(_err,
               maxLines: 3,
               textAlign: TextAlign.center,
               style: const TextStyle(fontSize: 11, color: Colors.white54)),
           const SizedBox(height: 16),
-          FilledButton.icon(
-            onPressed: () {
-              Navigator.of(context).pushReplacement(
-                MaterialPageRoute<void>(
-                  builder: (_) => WebScreen(url: widget.url, title: widget.title),
-                ),
-              );
-            },
-            icon: const Icon(Icons.language),
-            label: const Text('Abrir na WebView'),
+          Wrap(
+            spacing: 10,
+            children: <Widget>[
+              FilledButton.icon(
+                onPressed: () => _open(widget.url, first: true),
+                icon: const Icon(Icons.refresh),
+                label: const Text('Tentar novamente'),
+              ),
+              OutlinedButton.icon(
+                onPressed: _openWeb,
+                icon: const Icon(Icons.language),
+                label: const Text('Abrir na WebView'),
+              ),
+            ],
           ),
         ],
       ),
@@ -2667,7 +4219,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
           const Spacer(),
           if (c != null && c.value.isInitialized) _playRow(c),
           const Spacer(),
-          if (c != null && c.value.isInitialized) _seekBar(c),
+          if (c != null && c.value.isInitialized && !widget.live) _seekBar(c),
+          if (widget.live) const SizedBox(height: 14),
         ],
       ),
     );
@@ -2689,27 +4242,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
               style: const TextStyle(fontWeight: FontWeight.w600),
             ),
           ),
-          Container(
-            margin: const EdgeInsets.only(right: 6),
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-            decoration: BoxDecoration(
-              color: Colors.black54,
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: kGold.withValues(alpha: 0.5)),
-            ),
-            child: const Row(
-              mainAxisSize: MainAxisSize.min,
-              children: <Widget>[
-                Icon(Icons.hd_outlined, size: 12, color: kGold),
-                SizedBox(width: 4),
-                Text('AUTO',
-                    style: TextStyle(
-                        fontSize: 10,
-                        color: kGold,
-                        fontWeight: FontWeight.w800)),
-              ],
-            ),
-          ),
+          _qualityBtn(),
           if (widget.provider.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(right: 10),
@@ -2723,6 +4256,59 @@ class _PlayerScreenState extends State<PlayerScreen> {
           ),
         ],
       ),
+    );
+  }
+
+  Widget _pill(String t) {
+    return Container(
+      margin: const EdgeInsets.only(right: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+      decoration: BoxDecoration(
+        color: Colors.black54,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: kGold.withValues(alpha: 0.5)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          const Icon(Icons.hd_outlined, size: 12, color: kGold),
+          const SizedBox(width: 4),
+          Text(t,
+              style: const TextStyle(
+                  fontSize: 10, color: kGold, fontWeight: FontWeight.w800)),
+        ],
+      ),
+    );
+  }
+
+  Widget _qualityBtn() {
+    if (widget.live || _variants.isEmpty) return _pill(_qualityLabel);
+    return PopupMenuButton<int>(
+      tooltip: 'Qualidade',
+      onSelected: (int v) {
+        if (v < 0) {
+          setState(() {
+            _auto = true;
+            _qualityLabel = 'AUTO';
+            _degraded = false;
+          });
+          _open(widget.url);
+        } else {
+          _switchTo(_variants[v]);
+        }
+      },
+      itemBuilder: (BuildContext c) {
+        final List<PopupMenuEntry<int>> items = <PopupMenuEntry<int>>[
+          const PopupMenuItem<int>(
+              value: -1, child: Text('AUTO (adaptativo)')),
+        ];
+        for (int i = _variants.length - 1; i >= 0; i--) {
+          items.add(PopupMenuItem<int>(
+              value: i, child: Text(_variants[i].label)));
+        }
+        return items;
+      },
+      child: _pill(_qualityLabel),
     );
   }
 
@@ -2858,7 +4444,6 @@ class _TrailerViewState extends State<TrailerView> {
           'https://www.youtube.com/embed/${widget.videoKey}?autoplay=1&playsinline=1&rel=0&modestbranding=1'));
   }
 
-  /// Empurra o play() no <video> do embed (contorna autoplay bloqueado).
   Future<void> _nudge() async {
     const String js =
         "try{var v=document.querySelector('video');if(v){v.play();}}catch(e){}";
@@ -2892,7 +4477,9 @@ class _WebScreenState extends State<WebScreen> {
   @override
   void initState() {
     super.initState();
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    try {
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    } catch (_) {}
     final WebViewController ctl = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setBackgroundColor(Colors.black)
@@ -2933,7 +4520,13 @@ class _WebScreenState extends State<WebScreen> {
 
   @override
   void dispose() {
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    try {
+      _ctl?.clearCache();
+    } catch (_) {}
+    CacheKeeper.wipe();
+    try {
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    } catch (_) {}
     super.dispose();
   }
 
