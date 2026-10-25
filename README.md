@@ -47,13 +47,7 @@ flutter doctor
 
 2. Obtenha uma chave de API no [TMDB](https://www.themoviedb.org/settings/api).
 
-3. Abra `lib/main.dart` e substitua `SUA_CHAVE_AQUI` pela sua chave:
-
-   ```dart
-   String tmdbApiKey = "SUA_CHAVE_AQUI";
-   ```
-
-   Mantenha a chave fora de commits públicos. Como o app Flutter consulta o TMDB diretamente, uma chave incluída no aplicativo pode ser extraída do pacote compilado; para um produto público, considere intermediar as chamadas por um serviço de backend.
+3. O aplicativo usa o proxy `tmdb-proxy` do Supabase para consultar o TMDB. A chave privada da API do TMDB fica somente no secret `TMDB_API_KEY` do Supabase; ela não deve ser adicionada ao Flutter nem ao GitHub. O app envia apenas a chave pública `sb_publishable_` no cabeçalho `apikey`.
 
 4. Baixe as dependências:
 
