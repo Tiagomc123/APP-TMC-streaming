@@ -1,0 +1,6 @@
+﻿Projeto: TMC
+Pacote Flutter: mc
+Versao: 1.0.0+1
+Data: 2026-10-25 16:23:46
+Branch: main
+Commit: c351999
