@@ -26,6 +26,7 @@ import 'package:video_player/video_player.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:youtube_player_flutter/youtube_player_flutter.dart';
 
 import 'tmc_frame_stub.dart' if (dart.library.html) 'tmc_frame_web.dart';
 
@@ -38,8 +39,7 @@ const String kSupabasePublishableKey =
     'sb_publishable_XyCk8TPrdGOzUrrr-59PpQ__dBWOFb9';
 const String kTmdbImg = 'https://image.tmdb.org/t/p';
 
-/// UA de Chrome mobile REAL (sem o marcador 'wv' do Android WebView).
-/// O 'wv' faz o Cloudflare tratar como bot e o YouTube devolver erro 153.
+/// User-Agent de compatibilidade para sites móveis; não contorna desafios de segurança.
 const String kUserAgent =
     'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36';
 
@@ -909,13 +909,13 @@ class SuperFlix {
   static const String base = 'https://superflixapi.fun';
   static const String parceiro = 'https://pobreflixhd.sbs';
 
-  static String filme(String id) => '$base/filme/$id';
-  static String serie(String id, int s, int e) => '$base/serie/$id/$s/$e';
+  static String filme(String id) => '$base$id';
+  static String serie(String id, int s, int e) => '$base$id/$s/$e';
   static String canal(String id) => '$base/canal/$id';
 
-  static String filmeParceiro(String id) => '$parceiro/filme/$id';
+  static String filmeParceiro(String id) => '$parceiro$id';
   static String serieParceira(String id, int s, int e) =>
-      '$parceiro/serie/$id/$s/$e';
+      '$parceiro$id/$s/$e';
   static String canalParceiro(String id) => '$parceiro/canal/$id';
 
   static List<String> rotasJson(bool isTv, String id, int s, int e) => isTv
@@ -930,7 +930,7 @@ class SuperFlix {
           filme(id),
         ];
 
-  /// Headers de navegador real: e isso que faz o Cloudflare liberar.
+  /// Headers usuais de navegação; não contornam desafios de segurança do site.
   static Map<String, String> headers([String referer = '']) => <String, String>{
         'User-Agent': kUserAgent,
         'Accept':
@@ -1541,21 +1541,7 @@ Future<void> openPlayer(
 }
 
 // ============================ TRAILER ================================
-/// URL de embed com 'origin' correto -> o YouTube nao devolve Erro 153.
-String ytEmbed(String key) {
-  String origin = 'https://www.youtube.com';
-  if (kIsWeb) {
-    try {
-      origin = Uri.base.origin;
-    } catch (_) {
-      origin = 'https://www.youtube.com';
-    }
-  }
-  return 'https://www.youtube.com/embed/$key'
-      '?autoplay=1&playsinline=1&rel=0&modestbranding=1&enablejsapi=1'
-      '&origin=$origin';
-}
-
+/// Player inline do YouTube usando o pacote youtube_player_flutter.
 class TrailerPlayer extends StatefulWidget {
   final String videoKey;
   const TrailerPlayer({super.key, required this.videoKey});
@@ -1565,236 +1551,145 @@ class TrailerPlayer extends StatefulWidget {
 }
 
 class _TrailerPlayerState extends State<TrailerPlayer> {
-  WebViewController? _ctl;
-  bool _falhou = false;
-  bool _paisagem = false;
-  int _v = 0;
+  late final YoutubePlayerController _controller;
+  bool _paisagem = true;
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _montar());
+    _controller = YoutubePlayerController(
+      initialVideoId: widget.videoKey,
+      flags: const YoutubePlayerFlags(
+        autoPlay: true,
+        mute: false,
+        enableCaption: true,
+        hideControls: false,
+        controlsVisibleAtStart: true,
+        useHybridComposition: true,
+      ),
+    );
+  }
+
+  Future<void> _alternarTela() async {
+    if (_paisagem) {
+      await Tela.voltarRetrato();
+      if (mounted) setState(() => _paisagem = false);
+    } else {
+      await Tela.paisagemTotal();
+      if (mounted) setState(() => _paisagem = true);
+      _controller.toggleFullScreenMode();
+    }
   }
 
   @override
   void dispose() {
-    final WebViewController? c = _ctl;
-    if (c != null) {
-      try {
-        c.runJavaScript('try{var v=document.querySelector("video");if(v){v.pause();}}catch(e){}');
-      } catch (_) {}
-    }
+    _controller.pause();
+    _controller.dispose();
     super.dispose();
-  }
-
-  Future<void> _montar() async {
-    if (kIsWeb) {
-      if (mounted) setState(() {});
-      return;
-    }
-    try {
-      final WebViewController c = WebViewController();
-      await c.setJavaScriptMode(JavaScriptMode.unrestricted);
-      await c.setBackgroundColor(Colors.black);
-      await afinarWebView(c);
-      await c.setNavigationDelegate(NavigationDelegate(
-        onPageFinished: (String _) => _nudge(),
-        onWebResourceError: (WebResourceError e) {
-          if (mounted && e.isForMainFrame == true) {
-            setState(() => _falhou = true);
-          }
-        },
-      ));
-      await c.loadRequest(
-        Uri.parse(ytEmbed(widget.videoKey)),
-        headers: <String, String>{
-          'Referer': kYtReferer,
-          'Origin': 'https://www.youtube.com',
-        },
-      );
-      if (mounted) setState(() => _ctl = c);
-    } catch (_) {
-      if (mounted) setState(() => _falhou = true);
-    }
-  }
-
-  Future<void> _nudge() async {
-    final WebViewController? c = _ctl;
-    if (c == null) return;
-    const String js =
-        'try{var v=document.querySelector("video");if(v){v.muted=false;v.play();}}catch(e){}';
-    try {
-      await c.runJavaScript(js);
-    } catch (_) {}
-    await Future<void>.delayed(const Duration(milliseconds: 900));
-    try {
-      await c.runJavaScript(js);
-    } catch (_) {}
-  }
-
-  Future<void> _abrirNoYouTube() async {
-    final Uri uri = Uri.https('www.youtube.com', '/watch', {
-      'v': widget.videoKey,
-    });
-    try {
-      if (await canLaunchUrl(uri)) {
-        await launchUrl(uri, mode: LaunchMode.externalApplication);
-      }
-    } catch (_) {}
-  }
-
-  Future<void> _alternarTela() async {
-    _paisagem = !_paisagem;
-    if (_paisagem) {
-      await Tela.paisagemTotal();
-    } else {
-      await Tela.voltarRetrato();
-    }
-    if (mounted) setState(() => _v++);
   }
 
   @override
   Widget build(BuildContext context) {
     return Stack(
+      fit: StackFit.expand,
       children: <Widget>[
-        Positioned.fill(child: _video()),
+        YoutubePlayer(
+          controller: _controller,
+          showVideoProgressIndicator: true,
+          progressIndicatorColor: kGold,
+          progressColors: const ProgressBarColors(
+            playedColor: kGold,
+            handleColor: kGold,
+            bufferedColor: Colors.white38,
+            backgroundColor: Colors.white12,
+          ),
+        ),
         Positioned(
           top: 2,
           right: 2,
-          child: Row(
-            children: <Widget>[
-              IconButton(
-                tooltip: 'Abrir no YouTube',
-                icon: const Icon(Icons.open_in_new, size: 18),
-                onPressed: _abrirNoYouTube,
+          child: Material(
+            color: Colors.black54,
+            borderRadius: BorderRadius.circular(24),
+            child: IconButton(
+              tooltip: _paisagem ? 'Voltar ao retrato' : 'Expandir',
+              icon: Icon(
+                _paisagem ? Icons.fullscreen_exit : Icons.fullscreen,
+                color: Colors.white,
+                size: 20,
               ),
-              if (!kIsWeb)
-                IconButton(
-                  tooltip: _paisagem ? 'Voltar ao retrato' : 'Expandir',
-                  icon: Icon(
-                      _paisagem
-                          ? Icons.fullscreen_exit
-                          : Icons.fullscreen,
-                      size: 20),
-                  onPressed: _alternarTela,
-                ),
-              if (!kIsWeb)
-                IconButton(
-                  tooltip: 'Recarregar',
-                  icon: const Icon(Icons.refresh, size: 18),
-                  onPressed: () {
-                    setState(() {
-                      _falhou = false;
-                      _ctl = null;
-                    });
-                    _montar();
-                  },
-                ),
-            ],
+              onPressed: _alternarTela,
+            ),
           ),
         ),
       ],
     );
   }
-
-  Widget _video() {
-    if (kIsWeb) {
-      return KeyedSubtree(
-        key: ValueKey<int>(_v),
-        child: TmcFrame(url: ytEmbed(widget.videoKey)),
-      );
-    }
-    final WebViewController? c = _ctl;
-    if (c == null) {
-      return Center(
-        child: _falhou
-            ? Column(
-                mainAxisSize: MainAxisSize.min,
-                children: <Widget>[
-                  const Icon(Icons.videocam_off, color: kGold, size: 34),
-                  const SizedBox(height: 8),
-                  const Text('Trailer nao carregou.',
-                      style: TextStyle(fontSize: 12, color: Colors.white70)),
-                  const SizedBox(height: 6),
-                  TextButton(
-                    onPressed: () {
-                      setState(() => _falhou = false);
-                      _montar();
-                    },
-                    child: const Text('Tentar novamente'),
-                  ),
-                ],
-              )
-            : const CircularProgressIndicator(),
-      );
-    }
-    return WebViewWidget(controller: c);
-  }
 }
 
 Future<void> showTrailer(
     BuildContext context, String videoKey, String title) async {
-  // libera a rotacao: o usuario pode girar o aparelho a vontade
-  await Tela.permitirGirar();
-  if (!context.mounted) return;
+  await Tela.paisagemTotal();
+  if (!context.mounted) {
+    await Tela.voltarRetrato();
+    return;
+  }
 
-  await showGeneralDialog<void>(
-    context: context,
-    barrierDismissible: true,
-    barrierLabel: 'Trailer',
-    barrierColor: Colors.black.withValues(alpha: 0.9),
-    transitionDuration: const Duration(milliseconds: 180),
-    pageBuilder: (BuildContext ctx, Animation<double> a, Animation<double> b) {
-      return Center(
-        child: SingleChildScrollView(
-          child: Padding(
-            padding: const EdgeInsets.all(14),
+  try {
+    await showGeneralDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: 'Trailer',
+      barrierColor: Colors.black.withValues(alpha: 0.9),
+      transitionDuration: const Duration(milliseconds: 180),
+      pageBuilder: (BuildContext ctx, Animation<double> a, Animation<double> b) {
+        return Material(
+          color: Colors.black,
+          child: SafeArea(
             child: Column(
-              mainAxisSize: MainAxisSize.min,
               children: <Widget>[
                 Row(
                   children: <Widget>[
                     const Icon(Icons.movie_creation_outlined, color: kGold),
                     const SizedBox(width: 8),
                     Expanded(
-                      child: Text(title,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontWeight: FontWeight.w700)),
+                      child: Text(
+                        title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontWeight: FontWeight.w700),
+                      ),
                     ),
                     IconButton(
+                      tooltip: 'Fechar trailer',
                       icon: const Icon(Icons.close),
                       onPressed: () => Navigator.of(ctx).pop(),
                     ),
                   ],
                 ),
-                const SizedBox(height: 4),
-                AspectRatio(
-                  aspectRatio: 16 / 9,
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(12),
-                    child: TrailerPlayer(videoKey: videoKey),
+                Expanded(
+                  child: Center(
+                    child: AspectRatio(
+                      aspectRatio: 16 / 9,
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(12),
+                        child: TrailerPlayer(videoKey: videoKey),
+                      ),
+                    ),
                   ),
-                ),
-                const SizedBox(height: 8),
-                const Text(
-                  'Use o icone de expandir para virar a tela.',
-                  style: TextStyle(fontSize: 10.5, color: Colors.white38),
                 ),
               ],
             ),
           ),
-        ),
-      );
-    },
-    transitionBuilder: (BuildContext ctx, Animation<double> a,
-        Animation<double> b, Widget child) {
-      return FadeTransition(opacity: a, child: child);
-    },
-  );
-
-  // volta o app ao normal (retrato + barras do sistema)
-  await Tela.restaurarApp();
+        );
+      },
+      transitionBuilder: (BuildContext ctx, Animation<double> a,
+          Animation<double> b, Widget child) {
+        return FadeTransition(opacity: a, child: child);
+      },
+    );
+  } finally {
+    await Tela.voltarRetrato();
+  }
 }
 
 // ======================= SCROLL PARA WEB =============================
@@ -5779,7 +5674,7 @@ class _WebScreenState extends State<WebScreen> {
       final WebViewController ctl = WebViewController();
       await ctl.setJavaScriptMode(JavaScriptMode.unrestricted);
       await ctl.setBackgroundColor(Colors.black);
-      // UA de Chrome real: e isto que passa a verificacao do Cloudflare.
+      // A WebView permite JavaScript e mídia; desafios do site podem exigir interação.
       await afinarWebView(ctl);
       await ctl.setNavigationDelegate(
         NavigationDelegate(
