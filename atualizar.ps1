@@ -204,9 +204,10 @@ import 'package:url_launcher/url_launcher.dart';
 import 'tmc_frame_stub.dart' if (dart.library.html) 'tmc_frame_web.dart';
 
 // ======================= CONFIGURACAO ================================
-String tmdbApiKey = "__TMDB_KEY__";
-
-const String kTmdbBase = 'https://api.themoviedb.org/3';
+const String kTmdbBase =
+    'https://xjqdiulxrprxegfrufyf.supabase.co/functions/v1/tmdb-proxy';
+const String kSupabasePublishableKey =
+    'sb_publishable_XyCk8TPrdGOzUrrr-59PpQ__dBWOFb9';
 const String kTmdbImg = 'https://image.tmdb.org/t/p';
 
 /// UA de Chrome mobile REAL (sem o marcador 'wv' do Android WebView).
@@ -886,33 +887,26 @@ class TmdbException implements Exception {
 }
 
 class TmdbService {
-  static bool get ok =>
-      tmdbApiKey.trim().isNotEmpty && tmdbApiKey != 'SUA_CHAVE_AQUI';
-
-  static void _check() {
-    if (!ok) {
-      throw TmdbException(
-          'Cole a sua chave do TMDB na variavel tmdbApiKey (topo do lib/main.dart).');
-    }
-  }
+  static bool get ok => true;
 
   static Future<Map<String, dynamic>> _get(String path,
       [Map<String, String>? q]) async {
-    _check();
     final Map<String, String> params = <String, String>{
-      'api_key': tmdbApiKey,
+      'path': path,
       'language': 'pt-BR',
       'region': 'BR',
     };
     if (q != null) params.addAll(q);
-    final Uri uri = Uri.parse('$kTmdbBase$path').replace(queryParameters: params);
-    final http.Response res =
-        await http.get(uri).timeout(const Duration(seconds: 20));
+    final Uri uri = Uri.parse(kTmdbBase).replace(queryParameters: params);
+    final http.Response res = await http.get(
+      uri,
+      headers: <String, String>{'apikey': kSupabasePublishableKey},
+    ).timeout(const Duration(seconds: 25));
     if (res.statusCode == 401) {
-      throw TmdbException('Chave do TMDB invalida (401). Confira a tmdbApiKey.');
+      throw TmdbException('O Supabase recusou a consulta (HTTP 401). Confira a configuracao da funcao tmdb-proxy.');
     }
     if (res.statusCode != 200) {
-      throw TmdbException('Erro do TMDB: HTTP ${res.statusCode}');
+      throw TmdbException('Erro do proxy TMDB: HTTP ${res.statusCode}');
     }
     return json.decode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
   }
@@ -3040,7 +3034,7 @@ class _HomeTabState extends State<HomeTab> {
       setState(() {
         _loading = false;
         _err =
-            'Cole a sua chave do TMDB na variavel tmdbApiKey (topo do lib/main.dart).';
+            'O proxy TMDB do Supabase nao respondeu como esperado.';
       });
       return;
     }
