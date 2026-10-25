@@ -909,13 +909,13 @@ class SuperFlix {
   static const String base = 'https://superflixapi.fun';
   static const String parceiro = 'https://pobreflixhd.sbs';
 
-  static String filme(String id) => '$base$id';
-  static String serie(String id, int s, int e) => '$base$id/$s/$e';
+  static String filme(String id) => '$base/$id';
+  static String serie(String id, int s, int e) => '$base/$id/$s/$e';
   static String canal(String id) => '$base/canal/$id';
 
-  static String filmeParceiro(String id) => '$parceiro$id';
+  static String filmeParceiro(String id) => '$parceiro/$id';
   static String serieParceira(String id, int s, int e) =>
-      '$parceiro$id/$s/$e';
+      '$parceiro/$id/$s/$e';
   static String canalParceiro(String id) => '$parceiro/canal/$id';
 
   static List<String> rotasJson(bool isTv, String id, int s, int e) => isTv
@@ -1565,7 +1565,6 @@ class _TrailerPlayerState extends State<TrailerPlayer> {
         enableCaption: true,
         hideControls: false,
         controlsVisibleAtStart: true,
-        useHybridComposition: true,
       ),
     );
   }
@@ -1577,7 +1576,6 @@ class _TrailerPlayerState extends State<TrailerPlayer> {
     } else {
       await Tela.paisagemTotal();
       if (mounted) setState(() => _paisagem = true);
-      _controller.toggleFullScreenMode();
     }
   }
 
