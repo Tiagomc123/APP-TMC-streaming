@@ -1263,7 +1263,7 @@ class Resolver {
         embed ??= t;
         break;
       }
-      # Continua procurando um link direto nos outros servidores; o primeiro embed fica como ultimo recurso.
+      // Continua procurando um link direto nos outros servidores; o primeiro embed fica como ultimo recurso.
     }
     return embed;
   }
