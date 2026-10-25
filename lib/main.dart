@@ -30,9 +30,10 @@ import 'package:url_launcher/url_launcher.dart';
 import 'tmc_frame_stub.dart' if (dart.library.html) 'tmc_frame_web.dart';
 
 // ======================= CONFIGURACAO ================================
-String tmdbApiKey = "SUA_CHAVE_AQUI";
-
-const String kTmdbBase = 'https://api.themoviedb.org/3';
+// A chave TMDB fica guardada nos Secrets da Edge Function do Supabase.
+// O app nunca deve armazenar a chave privada do TMDB.
+const String kTmdbBase =
+    'https://npcimvdvmuyflclptesh.supabase.co/functions/v1/tmdb-proxy';
 const String kTmdbImg = 'https://image.tmdb.org/t/p';
 
 /// UA de Chrome mobile REAL (sem o marcador 'wv' do Android WebView).
@@ -712,33 +713,30 @@ class TmdbException implements Exception {
 }
 
 class TmdbService {
-  static bool get ok =>
-      tmdbApiKey.trim().isNotEmpty && tmdbApiKey != 'SUA_CHAVE_AQUI';
-
-  static void _check() {
-    if (!ok) {
-      throw TmdbException(
-          'Cole a sua chave do TMDB na variavel tmdbApiKey (topo do lib/main.dart).');
-    }
-  }
+  // O proxy usa a chave armazenada nos Secrets do Supabase.
+  static bool get ok => true;
 
   static Future<Map<String, dynamic>> _get(String path,
       [Map<String, String>? q]) async {
-    _check();
     final Map<String, String> params = <String, String>{
-      'api_key': tmdbApiKey,
+      'path': path,
       'language': 'pt-BR',
       'region': 'BR',
     };
     if (q != null) params.addAll(q);
-    final Uri uri = Uri.parse('$kTmdbBase$path').replace(queryParameters: params);
+    final Uri uri = Uri.parse(kTmdbBase).replace(queryParameters: params);
     final http.Response res =
-        await http.get(uri).timeout(const Duration(seconds: 20));
-    if (res.statusCode == 401) {
-      throw TmdbException('Chave do TMDB invalida (401). Confira a tmdbApiKey.');
+        await http.get(uri).timeout(const Duration(seconds: 25));
+    if (res.statusCode == 401 || res.statusCode == 403) {
+      throw TmdbException(
+          'O Supabase/TMDB recusou a consulta (HTTP ${res.statusCode}). Confira o segredo TMDB_API_KEY no Supabase.');
+    }
+    if (res.statusCode == 503) {
+      throw TmdbException(
+          'O segredo TMDB_API_KEY nao foi encontrado nos Secrets da Edge Function do Supabase.');
     }
     if (res.statusCode != 200) {
-      throw TmdbException('Erro do TMDB: HTTP ${res.statusCode}');
+      throw TmdbException('Erro do proxy TMDB: HTTP ${res.statusCode}');
     }
     return json.decode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
   }
@@ -2866,7 +2864,7 @@ class _HomeTabState extends State<HomeTab> {
       setState(() {
         _loading = false;
         _err =
-            'Cole a sua chave do TMDB na variavel tmdbApiKey (topo do lib/main.dart).';
+            'Nao foi possivel conectar ao proxy do TMDB no Supabase.';
       });
       return;
     }
