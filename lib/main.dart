@@ -1,11 +1,10 @@
-// =====================================================================
-//  TMC  -  AGREGADOR DE STREAMING                build 3.0  "TMC ULTRA"
+﻿// =====================================================================
+//  TMC  -  AGREGADOR DE STREAMING                build 4.0  "TMC PRIME"
 //  ------------------------------------------------------------------
-//  * Contas locais (usuario + senha) com backup em arquivo JSON
-//  * Favoritos e Historico: remover item a item e limpar tudo
-//  * Limpeza automatica de cache (imagens + player + webview)
-//  * Web sem AssertionError, arrasto com o mouse, abas e scroll infinito
-//  * Player HLS com qualidade AUTOMATICA, resume e fallback de servidores
+//  * Player nativo imersivo: +10s / -10s / do comeco / audio / legendas
+//  * Resolver resiliente SuperFlixAPI (JSON + deep-scan de .m3u8)
+//  * Login local com E-mail + Dica de Senha + recuperacao offline
+//  * Abas infinitas PT-BR, scroll por mouse, limpeza rigida de cache
 //  Alvos: Flutter Web / Android Mobile / Android TV (TV Box)
 //  >>>>> COLE A SUA CHAVE DO TMDB NA LINHA MARCADA ABAIXO <<<<<
 // =====================================================================
@@ -70,15 +69,15 @@ class CacheKeeper {
 
   static void install() {
     final ImageCache c = PaintingBinding.instance.imageCache;
-    c.maximumSize = 140;
-    c.maximumSizeBytes = 64 << 20;
+    c.maximumSize = 130;
+    c.maximumSizeBytes = 56 << 20;
     _timer?.cancel();
-    _timer = Timer.periodic(const Duration(seconds: 75), (Timer _) {
+    _timer = Timer.periodic(const Duration(seconds: 70), (Timer _) {
       PaintingBinding.instance.imageCache.clearLiveImages();
     });
   }
 
-  /// Descarte total: usado quando um video/webview e fechado.
+  /// Descarte total: chamado quando qualquer stream/webview e fechado.
   static void wipe() {
     final ImageCache c = PaintingBinding.instance.imageCache;
     c.clear();
@@ -95,7 +94,7 @@ class CacheKeeper {
 class LocalDb {
   static final Map<String, dynamic> root = <String, dynamic>{
     'app': 'TMC',
-    'version': 2,
+    'version': 3,
     'updated': '',
     'users': <String, dynamic>{},
   };
@@ -123,6 +122,17 @@ class LocalDb {
 
   static bool exists(String u) => users.containsKey(u.trim());
 
+  static bool emailTaken(String mail) {
+    final String m = mail.trim().toLowerCase();
+    if (m.isEmpty) return false;
+    for (final dynamic v in users.values) {
+      if (v is Map && (v['email'] ?? '').toString().toLowerCase() == m) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   static Map<String, dynamic>? user(String u) {
     final dynamic m = users[u.trim()];
     if (m is Map) return m.cast<String, dynamic>();
@@ -130,14 +140,26 @@ class LocalDb {
   }
 
   static String hashOf(String u) => (user(u)?['hash'] ?? '').toString();
+  static String emailOf(String u) => (user(u)?['email'] ?? '').toString();
+  static String hintOf(String u) => (user(u)?['hint'] ?? '').toString();
 
-  static Future<void> addUser(String u, String hash) async {
+  static Future<void> addUser(
+      String u, String hash, String email, String hint) async {
     users[u.trim()] = <String, dynamic>{
       'hash': hash,
+      'email': email.trim(),
+      'hint': hint.trim(),
       'created': DateTime.now().toIso8601String(),
       'favs': <dynamic>[],
       'prog': <dynamic>[],
     };
+    await save();
+  }
+
+  static Future<void> setPassword(String u, String hash) async {
+    final Map<String, dynamic> m = user(u) ?? <String, dynamic>{};
+    m['hash'] = hash;
+    users[u.trim()] = m;
     await save();
   }
 
@@ -208,7 +230,8 @@ class LocalDb {
       } catch (_) {}
     }
     if (best != null && best['users'] is Map) {
-      root['users'] = (best['users'] as Map<dynamic, dynamic>).cast<String, dynamic>();
+      root['users'] =
+          (best['users'] as Map<dynamic, dynamic>).cast<String, dynamic>();
       root['updated'] = bestDate;
     }
   }
@@ -229,10 +252,12 @@ class LocalDb {
 
 // ============================ CONTAS =================================
 class Auth {
-  static final RegExp _ok = RegExp(r'^[a-zA-Z0-9._-]{3,18}$');
+  static final RegExp _user = RegExp(r'^[a-zA-Z0-9._-]{3,18}$');
+  static final RegExp _mail =
+      RegExp(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$');
 
   static String hash(String u, String p) {
-    final String s = 'tmc|${u.trim().toLowerCase()}|$p|tmc';
+    final String s = 'tmc|${u.trim().toLowerCase()}|$p|prime';
     int a = 7;
     for (final int c in s.codeUnits) {
       a = ((a * 31) + c) & 0xFFFFFFFF;
@@ -247,7 +272,12 @@ class Auth {
   static String validateUser(String u) {
     final String t = u.trim();
     if (t.length < 3) return 'Use pelo menos 3 caracteres no usuario.';
-    if (!_ok.hasMatch(t)) return 'Use apenas letras, numeros, ponto, hifen ou _.';
+    if (!_user.hasMatch(t)) return 'Usuario: apenas letras, numeros, . _ -';
+    return '';
+  }
+
+  static String validateMail(String m) {
+    if (!_mail.hasMatch(m.trim())) return 'Informe um e-mail valido.';
     return '';
   }
 
@@ -263,15 +293,32 @@ class Auth {
     return null;
   }
 
-  static Future<String?> register(String u, String p) async {
+  static Future<String?> register(
+      String u, String p, String mail, String hint) async {
     final String eu = validateUser(u);
     if (eu.isNotEmpty) return eu;
+    final String em = validateMail(mail);
+    if (em.isNotEmpty) return em;
     final String ep = validatePass(p);
     if (ep.isNotEmpty) return ep;
+    if (hint.trim().length < 2) return 'Escreva uma dica de senha.';
     if (LocalDb.exists(u)) return 'Este usuario ja existe. Faca login.';
-    await LocalDb.addUser(u, hash(u, p));
+    if (LocalDb.emailTaken(mail)) return 'Este e-mail ja esta cadastrado.';
+    await LocalDb.addUser(u, hash(u, p), mail, hint);
     return null;
   }
+
+  static String? findUserByMail(String mail) {
+    final String m = mail.trim().toLowerCase();
+    for (final String u in LocalDb.names()) {
+      if (LocalDb.emailOf(u).toLowerCase() == m) return u;
+    }
+    return null;
+  }
+
+  static bool checkHint(String u, String answer) =>
+      LocalDb.hintOf(u).trim().toLowerCase() ==
+      answer.trim().toLowerCase();
 }
 
 // ============================ MODELOS ================================
@@ -415,28 +462,77 @@ class WatchItem {
 }
 
 class Channel {
+  final String id;
   final String name;
-  final String url;
   final String group;
+  final String logo;
 
-  const Channel(this.name, this.url, [this.group = 'ABERTOS']);
+  const Channel(this.id, this.name, [this.group = 'ABERTOS', this.logo = '']);
 
   Map<String, dynamic> toJson() =>
-      <String, dynamic>{'n': name, 'u': url, 'g': group};
+      <String, dynamic>{'i': id, 'n': name, 'g': group, 'l': logo};
 
   static Channel fromJson(Map<String, dynamic> j) => Channel(
+        (j['i'] ?? j['u'] ?? '').toString(),
         (j['n'] ?? '').toString(),
-        (j['u'] ?? '').toString(),
         (j['g'] ?? 'MEUS CANAIS').toString(),
+        (j['l'] ?? '').toString(),
       );
+}
+
+class SportEvent {
+  final String title;
+  final String sport;
+  final String competition;
+  final String status;
+  final String url;
+  final String logo;
+
+  const SportEvent(this.title, this.sport, this.competition, this.status,
+      this.url, this.logo);
 }
 
 class HlsVariant {
   final String url;
   final int bandwidth;
   final String label;
+  final String audioGroup;
+  final String subGroup;
 
-  const HlsVariant(this.url, this.bandwidth, this.label);
+  const HlsVariant(this.url, this.bandwidth, this.label, this.audioGroup,
+      this.subGroup);
+}
+
+class HlsMedia {
+  final String name;
+  final String lang;
+  final String url;
+  final bool isAudio;
+
+  const HlsMedia(this.name, this.lang, this.url, this.isAudio);
+}
+
+class Cue {
+  final int start;
+  final int end;
+  final String text;
+  const Cue(this.start, this.end, this.text);
+}
+
+class PlayTarget {
+  final String provider;
+  final String url;
+  final bool direct;
+  final String referer;
+  final String page;
+
+  PlayTarget({
+    required this.provider,
+    required this.url,
+    required this.direct,
+    this.referer = '',
+    this.page = '',
+  });
 }
 
 // ========================= ARMAZENAMENTO =============================
@@ -591,6 +687,7 @@ class TmdbService {
     final Map<String, String> params = <String, String>{
       'api_key': tmdbApiKey,
       'language': 'pt-BR',
+      'region': 'BR',
     };
     if (q != null) params.addAll(q);
     final Uri uri = Uri.parse('$kTmdbBase$path').replace(queryParameters: params);
@@ -647,7 +744,7 @@ class TmdbService {
     return out;
   }
 
-  /// Pagina unica - usada pelo scroll infinito das abas.
+  /// Pagina unica (scroll infinito das abas) - sempre pt-BR.
   static Future<List<MediaItem>> page(
       String path, bool isTv, int page, Map<String, String> q) async {
     try {
@@ -767,44 +864,163 @@ class TmdbService {
   }
 }
 
+// =============== SUPERFLIXAPI (rotas JSON oficiais + deep-scan) ======
+class SuperFlix {
+  static const String base = 'https://superflixapi.fun';
+
+  static Map<String, String> get headers => <String, String>{
+        'User-Agent': kUserAgent,
+        'Accept': 'application/json, text/html, */*',
+      };
+
+  static String filmeUrl(String id) => '$base/filme/$id';
+  static String serieUrl(String id, int s, int e) => '$base/serie/$id/$s/$e';
+  static String canalUrl(String id) => '$base/canal/$id';
+
+  static List<String> rotas(bool isTv, String id, int s, int e) => isTv
+      ? <String>[
+          '${serieUrl(id, s, e)}?format=json',
+          '${serieUrl(id, s, e)}?format=json&type=tmdb',
+          serieUrl(id, s, e),
+          '$base/e/serie/$id/$s/$e',
+        ]
+      : <String>[
+          '${filmeUrl(id)}?format=json',
+          '${filmeUrl(id)}?format=json&type=tmdb',
+          filmeUrl(id),
+          '$base/e/filme/$id',
+        ];
+
+  static Future<http.Response?> get(String url, [String referer = '']) async {
+    try {
+      final Map<String, String> h = headers;
+      if (referer.isNotEmpty) h['Referer'] = referer;
+      return await http
+          .get(Uri.parse(url), headers: h)
+          .timeout(const Duration(seconds: 16));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static String abs(String url, String base) {
+    try {
+      if (url.startsWith('//')) return 'https:$url';
+      return Uri.parse(base).resolve(url).toString();
+    } catch (_) {
+      return url;
+    }
+  }
+
+  /// Varre QUALQUER nivel do JSON procurando um valor que satisfaca o teste.
+  static String? deep(dynamic node, bool Function(String) test, [int d = 0]) {
+    if (d > 7 || node == null) return null;
+    if (node is String) return test(node) ? node : null;
+    if (node is List) {
+      for (final dynamic e in node) {
+        final String? r = deep(e, test, d + 1);
+        if (r != null) return r;
+      }
+      return null;
+    }
+    if (node is Map) {
+      for (final dynamic v in node.values) {
+        final String? r = deep(v, test, d + 1);
+        if (r != null) return r;
+      }
+    }
+    return null;
+  }
+
+  /// Canais publicos estaveis (JSON oficial).
+  static Future<List<Channel>> canais() async {
+    final List<Channel> out = <Channel>[];
+    final http.Response? r =
+        await get('$base/lista?category=canais&limit=400&format=json');
+    if (r == null) return out;
+    try {
+      final dynamic j = jsonDecode(utf8.decode(r.bodyBytes));
+      final List<dynamic> list =
+          (j is Map ? (j['data'] as List<dynamic>?) : null) ?? const <dynamic>[];
+      for (final dynamic e in list) {
+        if (e is! Map) continue;
+        final String id = (e['id'] ?? '').toString();
+        final String name = (e['name'] ?? '').toString();
+        if (id.isEmpty || name.isEmpty) continue;
+        out.add(Channel(id, name, (e['category'] ?? 'ABERTOS').toString(),
+            (e['logo_url'] ?? '').toString()));
+      }
+    } catch (_) {}
+    return out;
+  }
+
+  /// Eventos esportivos do dia (JSON oficial).
+  static Future<List<SportEvent>> eventos() async {
+    final List<SportEvent> out = <SportEvent>[];
+    final http.Response? r =
+        await get('$base/lista?category=eventos&limit=60&format=json');
+    if (r == null) return out;
+    try {
+      final dynamic j = jsonDecode(utf8.decode(r.bodyBytes));
+      final List<dynamic> list =
+          (j is Map ? (j['data'] as List<dynamic>?) : null) ?? const <dynamic>[];
+      for (final dynamic e in list) {
+        if (e is! Map) continue;
+        String p(List<String> k) {
+          for (final String key in k) {
+            final dynamic v = e[key];
+            if (v is String && v.trim().isNotEmpty) return v.trim();
+          }
+          return '';
+        }
+
+        final String title = p(<String>['name', 'title', 'match', 'event']);
+        final String url =
+            p(<String>['play_event_url', 'page_url', 'embed_url', 'url']);
+        if (title.isEmpty || url.isEmpty) continue;
+        out.add(SportEvent(
+          title,
+          p(<String>['sport', 'modality']),
+          p(<String>['competition', 'league', 'championship']),
+          p(<String>['status']),
+          abs(url, base),
+          p(<String>['event_logo', 'image', 'logo_url']),
+        ));
+      }
+    } catch (_) {}
+    return out;
+  }
+}
+
 // ===================== RESOLVEDORES (FALLBACK) =======================
-class PlayTarget {
-  final String provider;
-  final String url;
-  final bool direct;
-  final String referer;
-
-  PlayTarget({
-    required this.provider,
-    required this.url,
-    required this.direct,
-    this.referer = '',
-  });
-}
-
-typedef UrlBuilder = String Function(bool isTv, int id, int season, int episode);
-
-class Provider {
+class Source {
   final String name;
-  final UrlBuilder build;
-  const Provider(this.name, this.build);
+  final List<String> Function(bool isTv, int id, int s, int e) rotas;
+  final String Function(bool isTv, int id, int s, int e) page;
+
+  const Source(this.name, this.rotas, this.page);
 }
 
-final List<Provider> kProviders = <Provider>[
-  Provider(
-    'SuperFlixAPI',
-    (bool isTv, int id, int s, int e) => isTv
-        ? 'https://superflixapi.top/serie/$id/$s/$e'
-        : 'https://superflixapi.top/filme/$id',
-  ),
-  Provider(
+final List<Source> kSources = <Source>[
+  Source('SuperFlixAPI',
+      (bool isTv, int id, int s, int e) => SuperFlix.rotas(isTv, '$id', s, e),
+      (bool isTv, int id, int s, int e) =>
+          isTv ? SuperFlix.serieUrl('$id', s, e) : SuperFlix.filmeUrl('$id')),
+  Source(
     'EmbedCine',
-    (bool isTv, int id, int s, int e) => isTv
-        ? 'https://embedcine.com/serie/$id/$s/$e'
-        : 'https://embedcine.com/filme/$id',
+    (bool isTv, int id, int s, int e) => <String>[
+      isTv ? 'https://embedcine.com/serie/$id/$s/$e' : 'https://embedcine.com/filme/$id',
+    ],
+    (bool isTv, int id, int s, int e) =>
+        isTv ? 'https://embedcine.com/serie/$id/$s/$e' : 'https://embedcine.com/filme/$id',
   ),
-  Provider(
+  Source(
     'WarezCDN',
+    (bool isTv, int id, int s, int e) => <String>[
+      isTv
+          ? 'https://warezcdn.com/embed/serie.php?id=$id&season=$s&episode=$e'
+          : 'https://warezcdn.com/embed/filme.php?id=$id',
+    ],
     (bool isTv, int id, int s, int e) => isTv
         ? 'https://warezcdn.com/embed/serie.php?id=$id&season=$s&episode=$e'
         : 'https://warezcdn.com/embed/filme.php?id=$id',
@@ -814,133 +1030,323 @@ final List<Provider> kProviders = <Provider>[
 class Resolver {
   static final RegExp _m3u8 =
       RegExp(r'''https?://[^"'\s\\<>]+\.m3u8[^"'\s\\<>]*''');
+  static final RegExp _mp4 =
+      RegExp(r'''https?://[^"'\s\\<>]+\.mp4[^"'\s\\<>]*''');
   static final RegExp _iframe =
       RegExp(r'''<iframe[^>]*src=["']([^"']+)["']''', caseSensitive: false);
 
-  static Map<String, String> headers([String referer = '']) {
-    final Map<String, String> h = <String, String>{'User-Agent': kUserAgent};
-    if (referer.isNotEmpty) h['Referer'] = referer;
-    return h;
-  }
-
-  /// Varredura silenciosa via HEAD: confirma se o servidor esta vivo.
+  /// Varredura silenciosa via HEAD: confirma se o host esta vivo.
   static Future<bool> alive(String url) async {
     try {
       final http.Response r = await http
-          .head(Uri.parse(url), headers: headers())
+          .head(Uri.parse(url), headers: SuperFlix.headers)
           .timeout(const Duration(seconds: 7));
       if (r.statusCode >= 200 && r.statusCode < 400) return true;
     } catch (_) {}
-    try {
-      final http.Response r = await http
-          .get(Uri.parse(url), headers: headers())
-          .timeout(const Duration(seconds: 11));
-      return r.statusCode >= 200 && r.statusCode < 400;
-    } catch (_) {
-      return false;
-    }
+    return false;
   }
 
-  static Future<PlayTarget?> resolve(
-      Provider p, bool isTv, int id, int season, int episode) async {
-    final String pageUrl = p.build(isTv, id, season, episode);
-    final bool up = await alive(pageUrl);
+  static Future<PlayTarget?> _tentar(Source s, String rota, String page) async {
+    final http.Response? res = await SuperFlix.get(rota, page);
+    if (res == null) return null;
+    final String body = res.body;
+    final String head = body.trimLeft();
 
-    String body = '';
-    try {
-      final http.Response r = await http
-          .get(Uri.parse(pageUrl), headers: headers(pageUrl))
-          .timeout(const Duration(seconds: 15));
-      body = r.body;
-    } catch (_) {}
+    // --- resposta JSON: deep-scan por qualquer .m3u8 / .mp4 ---
+    if (head.startsWith('{') || head.startsWith('[')) {
+      dynamic j;
+      try {
+        j = jsonDecode(body);
+      } catch (_) {
+        return null;
+      }
+      final String? m = SuperFlix.deep(j, (String v) => v.contains('.m3u8'));
+      if (m != null) {
+        return PlayTarget(
+            provider: s.name,
+            url: SuperFlix.abs(m, rota),
+            direct: true,
+            referer: rota,
+            page: page);
+      }
+      final String? v = SuperFlix.deep(j, (String v) => v.contains('.mp4'));
+      if (v != null) {
+        return PlayTarget(
+            provider: s.name,
+            url: SuperFlix.abs(v, rota),
+            direct: true,
+            referer: rota,
+            page: page);
+      }
+      final String? pl = SuperFlix.deep(
+          j,
+          (String v) =>
+              v.startsWith('http') &&
+              (v.contains('/embed') || v.contains('/player') || v.contains('/e/')));
+      if (pl != null) {
+        return PlayTarget(
+            provider: s.name,
+            url: SuperFlix.abs(pl, rota),
+            direct: false,
+            referer: rota,
+            page: page);
+      }
+      return null;
+    }
 
+    // --- resposta HTML: regex direta de .m3u8 ---
     final Match? m = _m3u8.firstMatch(body);
     if (m != null) {
       return PlayTarget(
-          provider: p.name, url: m.group(0)!, direct: true, referer: pageUrl);
+          provider: s.name,
+          url: m.group(0)!,
+          direct: true,
+          referer: rota,
+          page: page);
     }
 
+    // --- HTML com iframe: segue um nivel ---
     final Match? f = _iframe.firstMatch(body);
     if (f != null) {
-      String src = f.group(1)!.trim();
-      if (src.startsWith('//')) src = 'https:$src';
-      src = Uri.parse(pageUrl).resolve(src).toString();
-      try {
-        final http.Response r2 = await http
-            .get(Uri.parse(src), headers: headers(pageUrl))
-            .timeout(const Duration(seconds: 12));
+      final String src = SuperFlix.abs(f.group(1)!.trim(), rota);
+      final Match? mDireto = _m3u8.firstMatch(src);
+      if (mDireto != null) {
+        return PlayTarget(
+            provider: s.name,
+            url: mDireto.group(0)!,
+            direct: true,
+            referer: rota,
+            page: page);
+      }
+      final http.Response? r2 = await SuperFlix.get(src, rota);
+      if (r2 != null) {
         final Match? m2 = _m3u8.firstMatch(r2.body);
         if (m2 != null) {
           return PlayTarget(
-              provider: p.name, url: m2.group(0)!, direct: true, referer: src);
+              provider: s.name,
+              url: m2.group(0)!,
+              direct: true,
+              referer: src,
+              page: page);
         }
-      } catch (_) {}
+        final Match? f2 = _iframe.firstMatch(r2.body);
+        if (f2 != null) {
+          return PlayTarget(
+              provider: s.name,
+              url: SuperFlix.abs(f2.group(1)!.trim(), src),
+              direct: false,
+              referer: rota,
+              page: page);
+        }
+      }
       return PlayTarget(
-          provider: p.name, url: src, direct: false, referer: pageUrl);
+          provider: s.name,
+          url: src,
+          direct: false,
+          referer: rota,
+          page: page);
     }
 
-    if (!up && body.isEmpty) return null;
-    return PlayTarget(
-        provider: p.name, url: pageUrl, direct: false, referer: pageUrl);
+    final Match? mp4 = _mp4.firstMatch(body);
+    if (mp4 != null) {
+      return PlayTarget(
+          provider: s.name,
+          url: mp4.group(0)!,
+          direct: true,
+          referer: rota,
+          page: page);
+    }
+
+    return null;
   }
 
-  /// Escolhe a melhor fonte viva: prioriza sempre o link direto (.m3u8).
+  /// Tenta todos os resolvedores: devolve o 1o link direto ou o 1o embed.
   static Future<PlayTarget?> best(bool isTv, int id, int season, int episode,
       {int forced = -1}) async {
-    final List<Provider> list =
-        forced >= 0 ? <Provider>[kProviders[forced]] : kProviders;
-    PlayTarget? page;
-    for (final Provider p in list) {
-      final PlayTarget? t = await resolve(p, isTv, id, season, episode);
-      if (t == null) continue;
-      if (t.direct) return t;
-      page ??= t;
+    final List<Source> lista =
+        forced >= 0 && forced < kSources.length
+            ? <Source>[kSources[forced]]
+            : kSources;
+    PlayTarget? embed;
+    for (final Source s in lista) {
+      final String page = s.page(isTv, id, season, episode);
+      for (final String rota in s.rotas(isTv, id, season, episode)) {
+        PlayTarget? t;
+        try {
+          t = await _tentar(s, rota, page);
+        } catch (_) {
+          t = null;
+        }
+        if (t == null) continue;
+        if (t.direct) return t;
+        embed ??= t;
+        break;
+      }
+      if (embed != null) break;
     }
-    return page;
+    return embed;
   }
 }
 
-// =================== HLS: QUALIDADE AUTOMATICA =======================
+// ======================= HLS (AUDIO/LEGENDAS) ========================
 class Hls {
-  static Future<List<HlsVariant>> variants(
-      String url, Map<String, String> headers) async {
+  static Future<String?> _fetch(String url, Map<String, String> h) async {
     try {
       final http.Response r = await http
-          .get(Uri.parse(url), headers: headers)
+          .get(Uri.parse(url), headers: h)
           .timeout(const Duration(seconds: 12));
-      final String body = r.body;
-      if (!body.contains('#EXT-X-STREAM-INF')) return <HlsVariant>[];
-      final List<String> lines = const LineSplitter().convert(body);
-      final List<HlsVariant> out = <HlsVariant>[];
-      for (int i = 0; i < lines.length; i++) {
-        final String l = lines[i].trim();
-        if (!l.startsWith('#EXT-X-STREAM-INF')) continue;
-        int bw = 0;
-        final Match? mb = RegExp(r'BANDWIDTH=(\d+)').firstMatch(l);
-        if (mb != null) bw = int.tryParse(mb.group(1)!) ?? 0;
-        String res = '';
-        final Match? mr = RegExp(r'RESOLUTION=(\d+x\d+)').firstMatch(l);
-        if (mr != null) res = mr.group(1)!;
-        for (int k = i + 1; k < lines.length; k++) {
-          final String n = lines[k].trim();
-          if (n.isEmpty || n.startsWith('#')) continue;
-          final String label =
-              res.isEmpty ? '${(bw / 1000).round()}k' : res;
-          out.add(HlsVariant(Uri.parse(url).resolve(n).toString(), bw, label));
+      if (r.statusCode == 200) return r.body;
+    } catch (_) {}
+    return null;
+  }
+
+  static String _abs(String url, String base) {
+    try {
+      return Uri.parse(base).resolve(url).toString();
+    } catch (_) {
+      return url;
+    }
+  }
+
+  static int _attr(String line, String key) {
+    final Match? m = RegExp('$key=(\\d+)').firstMatch(line);
+    return m == null ? 0 : (int.tryParse(m.group(1)!) ?? 0);
+  }
+
+  static String _name(String line) {
+    final Match? m = RegExp('NAME="([^"]+)"').firstMatch(line);
+    if (m != null) return m.group(1)!;
+    final Match? l = RegExp('LANGUAGE="([^"]+)"').firstMatch(line);
+    if (l != null) return l.group(1)!.toUpperCase();
+    return 'FAIXA';
+  }
+
+  static String _group(String line) {
+    final Match? m = RegExp('GROUP-ID="([^"]+)"').firstMatch(line);
+    return m == null ? '' : m.group(1)!;
+  }
+
+  /// Le o master playlist e separa faixas de video, audio e legendas.
+  static Future<Map<String, dynamic>> parse(
+      String url, Map<String, String> headers) async {
+    final Map<String, dynamic> out = <String, dynamic>{
+      'variants': <HlsVariant>[],
+      'audios': <HlsMedia>[],
+      'subs': <HlsMedia>[],
+    };
+    if (!url.contains('.m3u8')) return out;
+    final String? body = await _fetch(url, headers);
+    if (body == null || !body.contains('#EXT-X-STREAM-INF')) return out;
+
+    final List<String> lines = const LineSplitter().convert(body);
+    for (int i = 0; i < lines.length; i++) {
+      final String l = lines[i].trim();
+      if (l.startsWith('#EXT-X-MEDIA')) {
+        final bool audio = l.contains('TYPE=AUDIO');
+        final bool sub = l.contains('TYPE=SUBTITLES');
+        if (!audio && !sub) continue;
+        final Match? u = RegExp('URI="([^"]+)"').firstMatch(l);
+        final String uri = u == null ? '' : u.group(1)!;
+        (out[audio ? 'audios' : 'subs'] as List<HlsMedia>).add(HlsMedia(
+          _name(l),
+          _group(l),
+          uri.isEmpty ? '' : _abs(uri, url),
+          audio,
+        ));
+        continue;
+      }
+      if (!l.startsWith('#EXT-X-STREAM-INF')) continue;
+      final int bw = _attr(l, 'BANDWIDTH');
+      final Match? res = RegExp('RESOLUTION=(\\d+x\\d+)').firstMatch(l);
+      final Match? au = RegExp('AUDIO="([^"]+)"').firstMatch(l);
+      final Match? su = RegExp('SUBTITLES="([^"]+)"').firstMatch(l);
+      for (int k = i + 1; k < lines.length; k++) {
+        final String n = lines[k].trim();
+        if (n.isEmpty || n.startsWith('#')) continue;
+        (out['variants'] as List<HlsVariant>).add(HlsVariant(
+          _abs(n, url),
+          bw,
+          res == null ? '${(bw / 1000).round()}k' : res.group(1)!,
+          au == null ? '' : au.group(1)!,
+          su == null ? '' : su.group(1)!,
+        ));
+        break;
+      }
+    }
+    (out['variants'] as List<HlsVariant>)
+        .sort((HlsVariant a, HlsVariant b) => a.bandwidth.compareTo(b.bandwidth));
+    return out;
+  }
+
+  /// Baixa e converte uma faixa de legenda em cues prontos para exibir.
+  static Future<List<Cue>> cues(String url, Map<String, String> headers) async {
+    if (url.isEmpty) return <Cue>[];
+    String? raw = await _fetch(url, headers);
+    if (raw == null) return <Cue>[];
+    if (raw.contains('#EXTM3U')) {
+      final List<String> lines = const LineSplitter().convert(raw);
+      for (final String l in lines) {
+        final String n = l.trim();
+        if (n.isEmpty || n.startsWith('#')) continue;
+        final String? seg = await _fetch(_abs(n, url), headers);
+        if (seg != null && seg.contains('-->')) {
+          raw = seg;
           break;
         }
       }
-      out.sort((HlsVariant a, HlsVariant b) =>
-          a.bandwidth.compareTo(b.bandwidth));
-      return out;
-    } catch (_) {
-      return <HlsVariant>[];
     }
+    return parseVtt(raw ?? '');
+  }
+
+  static List<Cue> parseVtt(String raw) {
+    final List<Cue> out = <Cue>[];
+    final String limpo =
+        raw.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+    for (final String bloco in limpo.split('\n\n')) {
+      final List<String> linhas = bloco
+          .split('\n')
+          .where((String l) => l.trim().isNotEmpty)
+          .toList();
+      if (linhas.isEmpty) continue;
+      int idx = 0;
+      if (!linhas[0].contains('-->')) {
+        if (linhas.length < 2) continue;
+        idx = 1;
+      }
+      if (!linhas[idx].contains('-->')) continue;
+      final List<String> t = linhas[idx].split('-->');
+      if (t.length < 2) continue;
+      final int ini = _ms(t[0]);
+      final int fim = _ms(t[1]);
+      if (ini < 0 || fim < 0) continue;
+      final String texto = linhas
+          .skip(idx + 1)
+          .join('\n')
+          .replaceAll(RegExp(r'<[^>]+>'), '')
+          .trim();
+      if (texto.isEmpty) continue;
+      out.add(Cue(ini, fim, texto));
+    }
+    out.sort((Cue a, Cue b) => a.start.compareTo(b.start));
+    return out;
+  }
+
+  static int _ms(String t) {
+    final String s = t.trim().split(' ').first.replaceAll(',', '.');
+    final List<String> p = s.split(':');
+    if (p.isEmpty) return -1;
+    double total = 0;
+    for (final String part in p) {
+      final double v = double.tryParse(part) ?? -1;
+      if (v < 0) return -1;
+      total = total * 60 + v;
+    }
+    return (total * 1000).round();
   }
 }
 
 // ============================ HELPERS ================================
-String _fmtSeg(int seconds) {
+String fmtSeg(int seconds) {
   final int h = seconds ~/ 3600;
   final int m = (seconds % 3600) ~/ 60;
   final int s = seconds % 60;
@@ -1025,7 +1431,10 @@ Future<void> openPlayer(
     return;
   }
 
-  if (t.direct) {
+  // Web (Chrome) nao roda HLS nativo no <video>: prioriza o embed.
+  final bool usarNativo = t.direct && !kIsWeb;
+
+  if (usarNativo) {
     nav.push(MaterialPageRoute<void>(
       builder: (BuildContext _) => PlayerScreen(
         url: t!.url,
@@ -1035,11 +1444,16 @@ Future<void> openPlayer(
         media: item,
         season: season,
         episode: episode,
+        embed: t.page,
       ),
     ));
   } else {
     nav.push(MaterialPageRoute<void>(
-      builder: (BuildContext _) => WebScreen(url: t!.url, title: item.title),
+      builder: (BuildContext _) => WebScreen(
+        url: t!.url,
+        title: item.title,
+        provider: t.provider,
+      ),
     ));
   }
 }
@@ -1267,7 +1681,9 @@ class LoginScreen extends StatefulWidget {
 
 class _LoginScreenState extends State<LoginScreen> {
   final TextEditingController _u = TextEditingController();
+  final TextEditingController _m = TextEditingController();
   final TextEditingController _p = TextEditingController();
+  final TextEditingController _h = TextEditingController();
   bool _create = false;
   bool _busy = false;
   bool _see = false;
@@ -1283,7 +1699,9 @@ class _LoginScreenState extends State<LoginScreen> {
   @override
   void dispose() {
     _u.dispose();
+    _m.dispose();
     _p.dispose();
+    _h.dispose();
     super.dispose();
   }
 
@@ -1297,6 +1715,7 @@ class _LoginScreenState extends State<LoginScreen> {
     final String u = _u.text.trim();
     final String p = _p.text;
     FocusScope.of(context).unfocus();
+
     setState(() {
       _busy = true;
       _err = '';
@@ -1304,25 +1723,152 @@ class _LoginScreenState extends State<LoginScreen> {
 
     String? e;
     if (_create) {
-      e = await Auth.register(u, p);
+      e = await Auth.register(u, p, _m.text, _h.text);
       e ??= Auth.login(u, p);
     } else {
       e = Auth.login(u, p);
     }
 
     if (e != null) {
-      if (mounted) {
-        setState(() {
-          _err = e!;
-          _busy = false;
-        });
-      }
+      if (!mounted) return;
+      setState(() {
+        _err = e!;
+        _busy = false;
+      });
       return;
     }
 
     await Store.load(u);
     await widget.onDone(u);
     if (mounted) setState(() => _busy = false);
+  }
+
+  Future<void> _esqueci() async {
+    final TextEditingController mail = TextEditingController();
+    final TextEditingController resp = TextEditingController();
+    final TextEditingController nova = TextEditingController();
+
+    final bool? ok = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext ctx) {
+        String etapa = 'email';
+        String erro = '';
+        String usuario = '';
+        return StatefulBuilder(
+          builder: (BuildContext c, void Function(void Function()) set) {
+            return AlertDialog(
+              backgroundColor: kSurface,
+              title: const Text('Esqueci minha senha'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  if (etapa == 'email') ...<Widget>[
+                    const Text(
+                      'Informe o e-mail cadastrado. Vamos usar a sua Dica de Senha.',
+                      style: TextStyle(fontSize: 12, color: Colors.white70),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: mail,
+                      decoration: const InputDecoration(
+                          labelText: 'E-mail',
+                          border: OutlineInputBorder()),
+                    ),
+                  ],
+                  if (etapa == 'hint') ...<Widget>[
+                    Text('Usuario: $usuario',
+                        style: const TextStyle(fontWeight: FontWeight.w700)),
+                    const SizedBox(height: 8),
+                    Text('Dica: ${LocalDb.hintOf(usuario)}',
+                        style: const TextStyle(color: kGold, fontSize: 13)),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: resp,
+                      decoration: const InputDecoration(
+                          labelText: 'Resposta da dica',
+                          border: OutlineInputBorder()),
+                    ),
+                  ],
+                  if (etapa == 'nova') ...<Widget>[
+                    const Text('Resposta correta! Defina a nova senha.',
+                        style: TextStyle(color: kGreen, fontSize: 12)),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: nova,
+                      obscureText: true,
+                      decoration: const InputDecoration(
+                          labelText: 'Nova senha',
+                          border: OutlineInputBorder()),
+                    ),
+                  ],
+                  if (erro.isNotEmpty) ...<Widget>[
+                    const SizedBox(height: 10),
+                    Text(erro,
+                        style: const TextStyle(color: kRed, fontSize: 12)),
+                  ],
+                ],
+              ),
+              actions: <Widget>[
+                TextButton(
+                  onPressed: () => Navigator.of(ctx).pop(false),
+                  child: const Text('Cancelar'),
+                ),
+                FilledButton(
+                  onPressed: () {
+                    if (etapa == 'email') {
+                      final String? achou =
+                          Auth.findUserByMail(mail.text);
+                      if (achou == null) {
+                        set(() => erro = 'E-mail nao cadastrado neste aparelho.');
+                        return;
+                      }
+                      set(() {
+                        usuario = achou;
+                        erro = '';
+                        etapa = 'hint';
+                      });
+                      return;
+                    }
+                    if (etapa == 'hint') {
+                      if (!Auth.checkHint(usuario, resp.text)) {
+                        set(() => erro = 'Resposta incorreta. Tente novamente.');
+                        return;
+                      }
+                      set(() {
+                        erro = '';
+                        etapa = 'nova';
+                      });
+                      return;
+                    }
+                    final String ep = Auth.validatePass(nova.text);
+                    if (ep.isNotEmpty) {
+                      set(() => erro = ep);
+                      return;
+                    }
+                    Navigator.of(ctx).pop(true);
+                  },
+                  child: Text(etapa == 'nova' ? 'REDEFINIR' : 'CONTINUAR'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    if (ok != true) return;
+    final String? alvo = Auth.findUserByMail(mail.text);
+    if (alvo == null) return;
+    await LocalDb.setPassword(alvo, Auth.hash(alvo, nova.text));
+    if (!mounted) return;
+    setState(() {
+      _u.text = alvo;
+      _create = false;
+      _err = '';
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Senha redefinida. Faca login.')));
   }
 
   Future<void> _reimport() async {
@@ -1341,17 +1887,17 @@ class _LoginScreenState extends State<LoginScreen> {
       body: SafeArea(
         child: Center(
           child: SingleChildScrollView(
-            padding: const EdgeInsets.all(22),
+            padding: const EdgeInsets.all(20),
             child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 430),
+              constraints: const BoxConstraints(maxWidth: 440),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: <Widget>[
-                  const TmcLogo(size: 72),
-                  const SizedBox(height: 14),
+                  const TmcLogo(size: 70),
+                  const SizedBox(height: 12),
                   const Text('TMC',
                       style: TextStyle(
-                          fontSize: 30,
+                          fontSize: 28,
                           fontWeight: FontWeight.w900,
                           letterSpacing: 6)),
                   const SizedBox(height: 4),
@@ -1360,27 +1906,23 @@ class _LoginScreenState extends State<LoginScreen> {
                           fontSize: 11,
                           color: Colors.white38,
                           letterSpacing: 1)),
-                  const SizedBox(height: 26),
+                  const SizedBox(height: 22),
                   Card(
                     color: kSurface,
                     shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(16)),
                     child: Padding(
-                      padding: const EdgeInsets.all(18),
+                      padding: const EdgeInsets.all(16),
                       child: Column(
                         children: <Widget>[
                           Row(
                             children: <Widget>[
-                              Expanded(
-                                child: _modeButton('ENTRAR', !_create),
-                              ),
+                              Expanded(child: _mode('ENTRAR', !_create)),
                               const SizedBox(width: 8),
-                              Expanded(
-                                child: _modeButton('CRIAR CONTA', _create),
-                              ),
+                              Expanded(child: _mode('CRIAR CONTA', _create)),
                             ],
                           ),
-                          const SizedBox(height: 16),
+                          const SizedBox(height: 14),
                           TextField(
                             controller: _u,
                             autofocus: true,
@@ -1391,12 +1933,28 @@ class _LoginScreenState extends State<LoginScreen> {
                               border: OutlineInputBorder(),
                             ),
                           ),
-                          const SizedBox(height: 12),
+                          if (_create) ...<Widget>[
+                            const SizedBox(height: 10),
+                            TextField(
+                              controller: _m,
+                              keyboardType: TextInputType.emailAddress,
+                              decoration: const InputDecoration(
+                                labelText: 'E-mail',
+                                prefixIcon: Icon(Icons.alternate_email),
+                                border: OutlineInputBorder(),
+                              ),
+                            ),
+                          ],
+                          const SizedBox(height: 10),
                           TextField(
                             controller: _p,
                             obscureText: !_see,
-                            textInputAction: TextInputAction.done,
-                            onSubmitted: (String _) => _submit(),
+                            textInputAction: _create
+                                ? TextInputAction.next
+                                : TextInputAction.done,
+                            onSubmitted: (String _) {
+                              if (!_create) _submit();
+                            },
                             decoration: InputDecoration(
                               labelText: 'Senha',
                               prefixIcon: const Icon(Icons.lock_outline),
@@ -1409,14 +1967,28 @@ class _LoginScreenState extends State<LoginScreen> {
                               ),
                             ),
                           ),
+                          if (_create) ...<Widget>[
+                            const SizedBox(height: 10),
+                            TextField(
+                              controller: _h,
+                              decoration: const InputDecoration(
+                                labelText: 'Dica de senha',
+                                helperText:
+                                    'Ex: cidade onde nasci / nome do meu cao',
+                                prefixIcon: Icon(Icons.lightbulb_outline),
+                                border: OutlineInputBorder(),
+                              ),
+                            ),
+                          ],
+                          const SizedBox(height: 12),
                           if (_err.isNotEmpty) ...<Widget>[
-                            const SizedBox(height: 12),
+                            const SizedBox(height: 10),
                             Text(_err,
                                 textAlign: TextAlign.center,
                                 style: const TextStyle(
                                     color: kRed, fontSize: 12.5)),
                           ],
-                          const SizedBox(height: 16),
+                          const SizedBox(height: 14),
                           SizedBox(
                             width: double.infinity,
                             child: FilledButton.icon(
@@ -1439,12 +2011,17 @@ class _LoginScreenState extends State<LoginScreen> {
                               ),
                             ),
                           ),
+                          TextButton(
+                            onPressed: _esqueci,
+                            child: const Text('Esqueci minha senha',
+                                style: TextStyle(color: kGold, fontSize: 12)),
+                          ),
                         ],
                       ),
                     ),
                   ),
                   if (_contas.isNotEmpty) ...<Widget>[
-                    const SizedBox(height: 18),
+                    const SizedBox(height: 16),
                     const Text('Contas neste aparelho',
                         style: TextStyle(fontSize: 11.5, color: Colors.white38)),
                     const SizedBox(height: 8),
@@ -1455,20 +2032,19 @@ class _LoginScreenState extends State<LoginScreen> {
                       children: _contas
                           .map((String c) => ActionChip(
                                 label: Text(c),
-                                onPressed: () {
+                                onPressed: () => setState(() {
                                   _u.text = c;
-                                  setState(() => _create = false);
-                                },
+                                  _create = false;
+                                }),
                               ))
                           .toList(),
                     ),
                   ],
-                  const SizedBox(height: 22),
-                  Text(
-                    'Backup automatico em: ${LocalDb.location}',
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(fontSize: 10.5, color: Colors.white38),
-                  ),
+                  const SizedBox(height: 18),
+                  Text('Backup automatico em: ${LocalDb.location}',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                          fontSize: 10.5, color: Colors.white38)),
                   TextButton.icon(
                     onPressed: _reimport,
                     icon: const Icon(Icons.restore, size: 16),
@@ -1483,17 +2059,18 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
-  Widget _modeButton(String label, bool on) {
+  Widget _mode(String label, bool on) {
+    final bool alvo = label == 'ENTRAR';
     return SizedBox(
       height: 40,
       child: on
           ? FilledButton(
-              onPressed: () => setState(() => _create = label != 'ENTRAR'),
+              onPressed: () => setState(() => _create = !alvo),
               style: FilledButton.styleFrom(backgroundColor: kAccent),
               child: Text(label, style: const TextStyle(fontSize: 12)),
             )
           : OutlinedButton(
-              onPressed: () => setState(() => _create = label != 'ENTRAR'),
+              onPressed: () => setState(() => _create = !alvo),
               style: OutlinedButton.styleFrom(
                   foregroundColor: Colors.white70,
                   side: const BorderSide(color: Colors.white24)),
@@ -1568,21 +2145,40 @@ const List<GenreChip> kChipsFilmes = <GenreChip>[
 
 const List<GenreChip> kChipsSeries = <GenreChip>[
   GenreChip('TODAS', path: '/discover/tv'),
-  GenreChip('NOVELAS', path: '/discover/tv', withGenres: '10766'),
   GenreChip('DRAMA', path: '/discover/tv', withGenres: '18'),
   GenreChip('COMEDIA', path: '/discover/tv', withGenres: '35'),
   GenreChip('CRIME', path: '/discover/tv', withGenres: '80'),
   GenreChip('MISTERIO', path: '/discover/tv', withGenres: '9648'),
   GenreChip('SCI-FI', path: '/discover/tv', withGenres: '10765'),
   GenreChip('ACAO', path: '/discover/tv', withGenres: '10759'),
-  GenreChip('DORAMAS',
-      path: '/discover/tv',
-      withGenres: '18',
-      extra: <String, String>{'with_origin_country': 'KR'}),
   GenreChip('ANIMES',
       path: '/discover/tv',
       withGenres: '16',
       extra: <String, String>{'with_origin_country': 'JP'}),
+  GenreChip('DORAMAS',
+      path: '/discover/tv',
+      withGenres: '18',
+      extra: <String, String>{'with_origin_country': 'KR'}),
+];
+
+const List<GenreChip> kChipsNovelas = <GenreChip>[
+  GenreChip('BRASILEIRAS',
+      path: '/discover/tv',
+      withGenres: '10766',
+      extra: <String, String>{'with_origin_country': 'BR'}),
+  GenreChip('MEXICANAS',
+      path: '/discover/tv',
+      withGenres: '10766',
+      extra: <String, String>{'with_origin_country': 'MX'}),
+  GenreChip('TURCAS',
+      path: '/discover/tv',
+      withGenres: '10766',
+      extra: <String, String>{'with_origin_country': 'TR'}),
+  GenreChip('PORTUGUESAS',
+      path: '/discover/tv',
+      withGenres: '10766',
+      extra: <String, String>{'with_origin_country': 'PT'}),
+  GenreChip('TODAS', path: '/discover/tv', withGenres: '10766'),
 ];
 
 const List<GenreChip> kChipsDramas = <GenreChip>[
@@ -1590,7 +2186,6 @@ const List<GenreChip> kChipsDramas = <GenreChip>[
   GenreChip('DRAMA', path: '/discover/tv', withGenres: '18'),
   GenreChip('ROMANCE', path: '/discover/tv', withGenres: '10749'),
   GenreChip('COMEDIA', path: '/discover/tv', withGenres: '35'),
-  GenreChip('NOVELAS', path: '/discover/tv', withGenres: '10766'),
   GenreChip('DORAMAS',
       path: '/discover/tv',
       withGenres: '18',
@@ -1623,7 +2218,8 @@ class _RootShellState extends State<RootShell>
   static const List<String> _labels = <String>[
     'INICIO',
     'FILMES',
-    'SERIES E NOVELAS',
+    'SERIES',
+    'NOVELAS',
     'DRAMAS CURTOS',
     'KIDS',
     'TV ONLINE',
@@ -1645,6 +2241,11 @@ class _RootShellState extends State<RootShell>
           chips: kChipsSeries,
           base: <String, String>{},
           empty: 'Nenhuma serie encontrada.',
+        ),
+        const DiscoverTab(
+          chips: kChipsNovelas,
+          base: <String, String>{},
+          empty: 'Nenhuma novela encontrada.',
         ),
         const DiscoverTab(
           chips: kChipsDramas,
@@ -1687,8 +2288,8 @@ class _RootShellState extends State<RootShell>
 
   void _clean() {
     CacheKeeper.wipe();
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('Cache de imagens e temporarios liberados.')));
+    ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Cache de imagens liberado.')));
   }
 
   Future<void> _backup() async {
@@ -1707,7 +2308,7 @@ class _RootShellState extends State<RootShell>
                 style: const TextStyle(fontWeight: FontWeight.w700)),
             const SizedBox(height: 8),
             const Text(
-              'Favoritos e historico sao salvos automaticamente em arquivo. '
+              'Favoritos e historico sao salvos automaticamente. '
               'Reinstale o app e use REIMPORTAR BACKUP na tela de login.',
               style: TextStyle(fontSize: 12, color: Colors.white70),
             ),
@@ -1743,8 +2344,8 @@ class _RootShellState extends State<RootShell>
   }
 
   Future<void> _sair() async {
-    final bool ok =
-        await askConfirm(context, 'Sair da conta', 'Deseja sair de ${Store.user}?');
+    final bool ok = await askConfirm(
+        context, 'Sair da conta', 'Deseja sair de ${Store.user}?');
     if (!ok) return;
     await Store.persist();
     await widget.onLogout();
@@ -1854,9 +2455,7 @@ class _RootShellState extends State<RootShell>
           indicatorColor: kGold,
           labelStyle: const TextStyle(
               fontWeight: FontWeight.w800, fontSize: 12, letterSpacing: 0.6),
-          tabs: _labels
-              .map((String t) => Tab(height: 42, text: t))
-              .toList(),
+          tabs: _labels.map((String t) => Tab(height: 42, text: t)).toList(),
         ),
       ),
       body: TabBarView(
@@ -1933,7 +2532,6 @@ class _HomeTabState extends State<HomeTab> {
           await Future.wait(<Future<List<MediaItem>>>[
         TmdbService.trending(pages: 3),
         TmdbService.popularMovies(pages: 3),
-        TmdbService.topMovies(pages: 1),
         TmdbService.popularTv(pages: 3),
         TmdbService.novelas(pages: 2),
         TmdbService.shortDramas(pages: 2),
@@ -1944,11 +2542,11 @@ class _HomeTabState extends State<HomeTab> {
       setState(() {
         _trending = r[0];
         _movies = r[1];
-        _series = r[3];
-        _novelas = r[4];
-        _dramas = r[5];
-        _kids = r[6];
-        _action = r[7];
+        _series = r[2];
+        _novelas = r[3];
+        _dramas = r[4];
+        _kids = r[5];
+        _action = r[6];
         _hero = _pickHero(_trending);
         _loading = false;
       });
@@ -2007,7 +2605,8 @@ class _HomeTabState extends State<HomeTab> {
             if (_hero != null)
               SliverToBoxAdapter(child: HeroBanner(item: _hero!)),
             SliverToBoxAdapter(
-              child: ContinueRow(items: _cont, onChanged: _local, onClear: _clearHist),
+              child: ContinueRow(
+                  items: _cont, onChanged: _local, onClear: _clearHist),
             ),
             SliverToBoxAdapter(
               child: MediaRow(
@@ -2502,7 +3101,7 @@ class _ContinueCardState extends State<_ContinueCard> {
                               fontSize: 12.5, fontWeight: FontWeight.w700)),
                       const SizedBox(height: 2),
                       Text(
-                        '${w.label} - ${_fmtSeg(w.position)}',
+                        '${w.label} - ${fmtSeg(w.position)}',
                         style: const TextStyle(
                             fontSize: 10.5, color: Colors.white54),
                       ),
@@ -2624,8 +3223,8 @@ class _PosterCardState extends State<PosterCard> {
                 widget.item.title,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                    fontSize: 11.5, fontWeight: FontWeight.w600),
+                style:
+                    const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600),
               ),
               Text(
                 widget.item.year.isEmpty
@@ -2702,6 +3301,7 @@ class _DiscoverTabState extends State<DiscoverTab> {
       'sort_by': 'popularity.desc',
       'include_adult': 'false',
       'vote_count.gte': '8',
+      'language': 'pt-BR',
       ...widget.base,
       ...g.extra,
     };
@@ -2755,7 +3355,11 @@ class InfiniteGrid extends StatefulWidget {
   final Future<List<MediaItem>> Function(int page) loader;
   final String empty;
 
-  const InfiniteGrid({super.key, required this.loader, this.empty = 'Nada por aqui ainda.'});
+  const InfiniteGrid({
+    super.key,
+    required this.loader,
+    this.empty = 'Nada por aqui ainda.',
+  });
 
   @override
   State<InfiniteGrid> createState() => _InfiniteGridState();
@@ -2843,7 +3447,10 @@ class _InfiniteGridState extends State<InfiniteGrid> {
                   Icon(_fail ? Icons.cloud_off : Icons.inbox_outlined,
                       size: 46, color: Colors.white24),
                   const SizedBox(height: 12),
-                  Text(_fail ? 'Falha ao carregar. Puxe para tentar de novo.' : widget.empty,
+                  Text(
+                      _fail
+                          ? 'Falha ao carregar. Puxe para tentar de novo.'
+                          : widget.empty,
                       textAlign: TextAlign.center,
                       style: const TextStyle(color: Colors.white54)),
                 ],
@@ -2901,35 +3508,6 @@ class _InfiniteGridState extends State<InfiniteGrid> {
 }
 
 // ============================ TV ONLINE ==============================
-// Edite/adicione canais livremente nesta lista (links .m3u8 estaveis).
-const List<Channel> kCanais = <Channel>[
-  Channel('TV Cultura', 'https://livecdn.cultura.uol.com.br/culturahd.m3u8'),
-  Channel('TV Brasil', 'https://tvbrasil-stream.ebc.com.br/hls/tvbrasil.m3u8'),
-  Channel('TV Senado',
-      'https://senadolive.akamaized.net/hls/live/2012036/senado/playlist.m3u8'),
-  Channel('Record News',
-      'https://playplusch.akamaized.net/hls/live/2012036/RecordNewsBrasil/playlist.m3u8',
-      'NOTICIAS'),
-  Channel('CNN Brasil',
-      'https://cnnbrazillh.akamaized.net/hls/live/2031480/cnnbrasil/index.m3u8',
-      'NOTICIAS'),
-  Channel('Band News',
-      'https://bandnewslh.akamaized.net/hls/live/2040008/bandnews/index.m3u8',
-      'NOTICIAS'),
-  Channel('Euronews PT',
-      'https://euronews-euronews-portuguese-1-eu.rakuten.wurl.tv/playlist.m3u8',
-      'INTERNACIONAIS'),
-  Channel('Red Bull TV',
-      'https://rbmn-live.akamaized.net/hls/live/590964/BoRB-AT/master.m3u8',
-      'ESPORTES'),
-  Channel('Caze TV',
-      'https://cazetvlh.akamaized.net/hls/live/2040459/cazetv/index.m3u8',
-      'ESPORTES'),
-  Channel('BandSports',
-      'https://bandsportslh.akamaized.net/hls/live/2036193/bandsports/index.m3u8',
-      'ESPORTES'),
-];
-
 class OnlineTvTab extends StatefulWidget {
   const OnlineTvTab({super.key});
   @override
@@ -2937,7 +3515,11 @@ class OnlineTvTab extends StatefulWidget {
 }
 
 class _OnlineTvTabState extends State<OnlineTvTab> {
+  bool _eventos = false;
+  bool _carregando = true;
+  List<Channel> _canais = <Channel>[];
   List<Channel> _meus = <Channel>[];
+  List<SportEvent> _jogos = <SportEvent>[];
 
   @override
   void initState() {
@@ -2945,22 +3527,31 @@ class _OnlineTvTabState extends State<OnlineTvTab> {
     WidgetsBinding.instance.addPostFrameCallback((_) => _load());
   }
 
-  void _load() {
-    String raw = '';
+  Future<void> _load() async {
+    if (mounted) setState(() => _carregando = true);
+
+    final List<Channel> meus = <Channel>[];
     try {
-      raw = prefs.getString('tmc_ch_${Store.user}') ?? '';
-    } catch (_) {}
-    final List<Channel> out = <Channel>[];
-    if (raw.isNotEmpty) {
-      try {
+      final String raw = prefs.getString('tmc_ch_${Store.user}') ?? '';
+      if (raw.isNotEmpty) {
         final List<dynamic> l = jsonDecode(raw) as List<dynamic>;
         for (final dynamic e in l) {
-          out.add(Channel.fromJson(
+          meus.add(Channel.fromJson(
               (e as Map<dynamic, dynamic>).cast<String, dynamic>()));
         }
-      } catch (_) {}
-    }
-    if (mounted) setState(() => _meus = out);
+      }
+    } catch (_) {}
+
+    final List<Channel> api = await SuperFlix.canais();
+    final List<SportEvent> ev = await SuperFlix.eventos();
+
+    if (!mounted) return;
+    setState(() {
+      _meus = meus;
+      _canais = api;
+      _jogos = ev;
+      _carregando = false;
+    });
   }
 
   Future<void> _save() async {
@@ -2970,16 +3561,13 @@ class _OnlineTvTabState extends State<OnlineTvTab> {
     } catch (_) {}
   }
 
-  void _play(Channel c) {
+  void _abrir(String titulo, String url) {
     Navigator.of(context).push(MaterialPageRoute<void>(
-      builder: (_) => PlayerScreen(
-        url: c.url,
-        title: c.name,
-        provider: 'TV ONLINE',
-        live: true,
-      ),
+      builder: (_) => WebScreen(url: url, title: titulo, provider: 'TV ONLINE'),
     ));
   }
+
+  void _playCanal(Channel c) => _abrir(c.name, SuperFlix.canalUrl(c.id));
 
   Future<void> _add() async {
     final TextEditingController n = TextEditingController();
@@ -3001,7 +3589,8 @@ class _OnlineTvTabState extends State<OnlineTvTab> {
             TextField(
               controller: u,
               decoration: const InputDecoration(
-                  labelText: 'Link .m3u8', border: OutlineInputBorder()),
+                  labelText: 'Link .m3u8 ou pagina embed',
+                  border: OutlineInputBorder()),
             ),
           ],
         ),
@@ -3017,12 +3606,10 @@ class _OnlineTvTabState extends State<OnlineTvTab> {
     );
     if (ok != true) return;
     if (n.text.trim().isEmpty || u.text.trim().isEmpty) return;
-    setState(() {
-      _meus = <Channel>[
-        Channel(n.text.trim(), u.text.trim(), 'MEUS CANAIS'),
-        ..._meus,
-      ];
-    });
+    setState(() => _meus = <Channel>[
+          Channel(u.text.trim(), n.text.trim(), 'MEUS CANAIS'),
+          ..._meus,
+        ]);
     await _save();
   }
 
@@ -3030,13 +3617,15 @@ class _OnlineTvTabState extends State<OnlineTvTab> {
     final bool ok = await askConfirm(
         context, 'Remover canal', 'Remover "${c.name}" da sua lista?');
     if (!ok) return;
-    setState(() => _meus = _meus.where((Channel x) => x.url != c.url).toList());
+    setState(() => _meus = _meus.where((Channel x) => x.id != c.id).toList());
     await _save();
   }
 
   @override
   Widget build(BuildContext context) {
-    final List<Channel> todos = <Channel>[..._meus, ...kCanais];
+    if (_carregando) return const Center(child: CircularProgressIndicator());
+
+    final List<Channel> todos = <Channel>[..._meus, ..._canais];
     final List<String> grupos = <String>[];
     for (final Channel c in todos) {
       if (!grupos.contains(c.group)) grupos.add(c.group);
@@ -3047,12 +3636,31 @@ class _OnlineTvTabState extends State<OnlineTvTab> {
       children: <Widget>[
         Row(
           children: <Widget>[
-            const Expanded(
-              child: Text('CANAIS AO VIVO',
-                  style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w900,
-                      letterSpacing: 1)),
+            Expanded(
+              child: Row(
+                children: <Widget>[
+                  ChoiceChip(
+                    label: const Text('CANAIS',
+                        style: TextStyle(fontSize: 11.5)),
+                    selected: !_eventos,
+                    selectedColor: kGold,
+                    onSelected: (bool _) => setState(() => _eventos = false),
+                  ),
+                  const SizedBox(width: 8),
+                  ChoiceChip(
+                    label: const Text('ESPORTES',
+                        style: TextStyle(fontSize: 11.5)),
+                    selected: _eventos,
+                    selectedColor: kGold,
+                    onSelected: (bool _) => setState(() => _eventos = true),
+                  ),
+                ],
+              ),
+            ),
+            IconButton(
+              tooltip: 'Atualizar',
+              icon: const Icon(Icons.refresh),
+              onPressed: _load,
             ),
             FilledButton.icon(
               onPressed: _add,
@@ -3061,70 +3669,131 @@ class _OnlineTvTabState extends State<OnlineTvTab> {
             ),
           ],
         ),
-        const SizedBox(height: 12),
-        for (final String g in grupos) ...<Widget>[
-          Padding(
-            padding: const EdgeInsets.fromLTRB(2, 12, 2, 8),
-            child: Text(g,
-                style: const TextStyle(
-                    fontSize: 11.5,
-                    color: kGold,
-                    fontWeight: FontWeight.w800,
-                    letterSpacing: 1)),
+        const SizedBox(height: 10),
+        if (_eventos) ..._listaEventos() else ..._listaCanais(todos, grupos),
+      ],
+    );
+  }
+
+  List<Widget> _listaEventos() {
+    if (_jogos.isEmpty) {
+      return <Widget>[
+        const Padding(
+          padding: EdgeInsets.only(top: 60),
+          child: Center(
+            child: Text('Nenhum evento esportivo na agenda agora.',
+                style: TextStyle(color: Colors.white54)),
           ),
-          for (final Channel c in todos.where((Channel x) => x.group == g))
-            Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: Material(
-                color: kCard,
-                borderRadius: BorderRadius.circular(12),
-                clipBehavior: Clip.antiAlias,
-                child: InkWell(
-                  onTap: () => _play(c),
-                  onLongPress: c.group == 'MEUS CANAIS' ? () => _remove(c) : null,
-                  child: Padding(
-                    padding: const EdgeInsets.all(10),
-                    child: Row(
+        ),
+      ];
+    }
+    return _jogos.map((SportEvent e) {
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: Material(
+          color: kCard,
+          borderRadius: BorderRadius.circular(12),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            onTap: () => _abrir(e.title, e.url),
+            child: Padding(
+              padding: const EdgeInsets.all(10),
+              child: Row(
+                children: <Widget>[
+                  Container(
+                    width: 42,
+                    height: 42,
+                    decoration: BoxDecoration(
+                      color: kSurface,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Icon(Icons.sports_soccer, color: kGold),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: <Widget>[
-                        Container(
-                          width: 42,
-                          height: 42,
-                          decoration: BoxDecoration(
-                            color: kSurface,
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          child: const Icon(Icons.live_tv, color: kGold),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: <Widget>[
-                              Text(c.name,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                      fontWeight: FontWeight.w700,
-                                      fontSize: 13.5)),
-                              Text(c.url,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                      fontSize: 10, color: Colors.white38)),
-                            ],
-                          ),
-                        ),
-                        const Icon(Icons.play_circle_fill,
-                            color: Colors.white70),
+                        Text(e.title,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                                fontWeight: FontWeight.w700, fontSize: 13.5)),
+                        Text(
+                            <String>[e.competition, e.sport, e.status]
+                                .where((String s) => s.isNotEmpty)
+                                .join(' - '),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                                fontSize: 10.5, color: Colors.white38)),
                       ],
                     ),
                   ),
+                  const Icon(Icons.play_circle_fill, color: Colors.white70),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }).toList();
+  }
+
+  List<Widget> _listaCanais(List<Channel> todos, List<String> grupos) {
+    final List<Widget> out = <Widget>[];
+    for (final String g in grupos) {
+      out.add(Padding(
+        padding: const EdgeInsets.fromLTRB(2, 12, 2, 8),
+        child: Text(g.toUpperCase(),
+            style: const TextStyle(
+                fontSize: 11.5,
+                color: kGold,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 1)),
+      ));
+      for (final Channel c in todos.where((Channel x) => x.group == g)) {
+        out.add(Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: Material(
+            color: kCard,
+            borderRadius: BorderRadius.circular(12),
+            clipBehavior: Clip.antiAlias,
+            child: InkWell(
+              onTap: () => _playCanal(c),
+              onLongPress:
+                  c.group == 'MEUS CANAIS' ? () => _remove(c) : null,
+              child: Padding(
+                padding: const EdgeInsets.all(10),
+                child: Row(
+                  children: <Widget>[
+                    Container(
+                      width: 42,
+                      height: 42,
+                      decoration: BoxDecoration(
+                        color: kSurface,
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: const Icon(Icons.live_tv, color: kGold),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(c.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              fontWeight: FontWeight.w700, fontSize: 13.5)),
+                    ),
+                    const Icon(Icons.play_circle_fill, color: Colors.white70),
+                  ],
                 ),
               ),
             ),
-        ],
-      ],
-    );
+          ),
+        ));
+      }
+    }
+    return out;
   }
 }
 
@@ -3588,8 +4257,8 @@ class _DetailsScreenState extends State<DetailsScreen> {
           runSpacing: 8,
           children: <Widget>[
             _serverChip(-1, 'AUTOMATICO'),
-            for (int i = 0; i < kProviders.length; i++)
-              _serverChip(i, kProviders[i].name),
+            for (int i = 0; i < kSources.length; i++)
+              _serverChip(i, kSources[i].name),
           ],
         ),
         if (_isTv) _tvSection(),
@@ -3696,8 +4365,8 @@ class _DetailsScreenState extends State<DetailsScreen> {
             final int c = s['c'] as int;
             return DropdownMenuItem<int>(
               value: n,
-              child:
-                  Text('$name  ($c cap.)', style: const TextStyle(fontSize: 13)),
+              child: Text('$name  ($c cap.)',
+                  style: const TextStyle(fontSize: 13)),
             );
           }).toList(),
           onChanged: (int? v) async {
@@ -3832,12 +4501,13 @@ class _DetailsScreenState extends State<DetailsScreen> {
   }
 }
 
-// =========================== PLAYER VIDEO ============================
+// ======================= PLAYER NATIVO IMERSIVO ======================
 class PlayerScreen extends StatefulWidget {
   final String url;
   final String title;
   final String provider;
   final String referer;
+  final String embed;
   final MediaItem? media;
   final int season;
   final int episode;
@@ -3849,6 +4519,7 @@ class PlayerScreen extends StatefulWidget {
     required this.title,
     this.provider = '',
     this.referer = '',
+    this.embed = '',
     this.media,
     this.season = 1,
     this.episode = 1,
@@ -3868,7 +4539,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
   Timer? _hide;
   Timer? _saver;
   Timer? _watch;
+
   List<HlsVariant> _variants = <HlsVariant>[];
+  List<HlsMedia> _audios = <HlsMedia>[];
+  List<HlsMedia> _subs = <HlsMedia>[];
+  List<Cue> _cues = <Cue>[];
+  Cue? _cue;
+  int _audioSel = -1;
+  int _subSel = -1;
   bool _auto = true;
   bool _degraded = false;
   int _stall = 0;
@@ -3912,8 +4590,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   Future<void> _open(String url, {bool first = false}) async {
     final VideoPlayerController? old = _c;
-    final int keep =
-        (old != null && old.value.isInitialized) ? old.value.position.inSeconds : 0;
+    final int keep = (old != null && old.value.isInitialized)
+        ? old.value.position.inSeconds
+        : 0;
     _detach();
     if (mounted) {
       setState(() {
@@ -3990,18 +4669,22 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _watch ??= Timer.periodic(const Duration(seconds: 2), (Timer _) => _check());
     if (first) {
       _scheduleHide();
-      _loadVariants();
+      _carregarFaixas();
     }
   }
 
-  Future<void> _loadVariants() async {
+  Future<void> _carregarFaixas() async {
     if (widget.live || !widget.url.contains('.m3u8')) return;
-    final List<HlsVariant> v = await Hls.variants(widget.url, _headers);
+    final Map<String, dynamic> info = await Hls.parse(widget.url, _headers);
     if (!mounted) return;
-    if (v.isNotEmpty) setState(() => _variants = v);
+    setState(() {
+      _variants = (info['variants'] as List<HlsVariant>?) ?? <HlsVariant>[];
+      _audios = (info['audios'] as List<HlsMedia>?) ?? <HlsMedia>[];
+      _subs = (info['subs'] as List<HlsMedia>?) ?? <HlsMedia>[];
+    });
   }
 
-  Future<void> _switchTo(HlsVariant v, {bool auto = false}) async {
+  Future<void> _trocarQualidade(HlsVariant v, {bool auto = false}) async {
     if (mounted) {
       setState(() {
         _auto = auto;
@@ -4011,7 +4694,31 @@ class _PlayerScreenState extends State<PlayerScreen> {
     await _open(v.url);
   }
 
-  /// Qualidade automatica: se a rede engasgar, cai para a faixa mais leve.
+  Future<void> _trocarAudio(HlsMedia m) async {
+    setState(() => _audioSel = _audios.indexOf(m));
+    if (m.url.isEmpty) {
+      await _open(widget.url);
+      return;
+    }
+    await _open(m.url);
+  }
+
+  Future<void> _trocarLegenda(HlsMedia m) async {
+    if (_subSel >= 0 && _subs[_subSel].url == m.url) {
+      setState(() {
+        _subSel = -1;
+        _cues = <Cue>[];
+        _cue = null;
+      });
+      return;
+    }
+    setState(() => _subSel = _subs.indexOf(m));
+    final List<Cue> cues = await Hls.cues(m.url, _headers);
+    if (!mounted) return;
+    setState(() => _cues = cues);
+  }
+
+  /// Qualidade automatica: cai para a faixa mais leve se a rede engasgar.
   void _check() {
     final VideoPlayerController? c = _c;
     if (c == null || !c.value.isInitialized) return;
@@ -4025,7 +4732,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (_stall >= 3 && _auto && !_degraded && _variants.length > 1) {
       _degraded = true;
       _stall = 0;
-      _switchTo(_variants.first, auto: true);
+      _trocarQualidade(_variants.first, auto: true);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
             duration: Duration(seconds: 2),
@@ -4042,7 +4749,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         backgroundColor: kSurface,
         title: const Text('Continuar de onde parou?'),
         content: Text(
-          'Voce parou em ${_fmtSeg(seconds)}. Deseja retomar deste ponto?',
+          'Voce parou em ${fmtSeg(seconds)}. Deseja retomar deste ponto?',
           style: const TextStyle(color: Colors.white70),
         ),
         actions: <Widget>[
@@ -4078,8 +4785,21 @@ class _PlayerScreenState extends State<PlayerScreen> {
     ));
   }
 
+  Cue? _cueEm(int ms) {
+    for (final Cue c in _cues) {
+      if (c.start > ms) break;
+      if (ms >= c.start && ms <= c.end) return c;
+    }
+    return null;
+  }
+
   void _tick() {
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    final VideoPlayerController? c = _c;
+    final int ms = c == null ? 0 : c.value.position.inMilliseconds;
+    setState(() {
+      _cue = _cues.isEmpty ? null : _cueEm(ms);
+    });
   }
 
   void _scheduleHide() {
@@ -4092,6 +4812,23 @@ class _PlayerScreenState extends State<PlayerScreen> {
   void _toggleUi() {
     setState(() => _ui = !_ui);
     if (_ui) _scheduleHide();
+  }
+
+  Future<void> _doComeco() async {
+    final VideoPlayerController? c = _c;
+    if (c == null) return;
+    await Store.removeProgress(_key);
+    await c.seekTo(Duration.zero);
+    await c.play();
+    _scheduleHide();
+  }
+
+  void _pular(int segundos) {
+    final VideoPlayerController? c = _c;
+    if (c == null) return;
+    final Duration alvo = c.value.position + Duration(seconds: segundos);
+    c.seekTo(alvo < Duration.zero ? Duration.zero : alvo);
+    _scheduleHide();
   }
 
   @override
@@ -4114,11 +4851,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   void _openWeb() {
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => WebScreen(url: widget.url, title: widget.title),
-      ),
-    );
+    final String alvo = widget.embed.isNotEmpty ? widget.embed : widget.url;
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => WebScreen(url: alvo, title: widget.title),
+    ));
   }
 
   @override
@@ -4138,6 +4874,26 @@ class _PlayerScreenState extends State<PlayerScreen> {
           child: Stack(
             children: <Widget>[
               Center(child: _surface(c)),
+              if (_cue != null && !_ui)
+                Positioned(
+                  left: 20,
+                  right: 20,
+                  bottom: 34,
+                  child: Center(
+                    child: Text(
+                      _cue!.text,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        fontSize: 17,
+                        height: 1.3,
+                        fontWeight: FontWeight.w600,
+                        shadows: <Shadow>[
+                          Shadow(blurRadius: 6, color: Colors.black),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
               AnimatedOpacity(
                 opacity: _ui ? 1 : 0,
                 duration: const Duration(milliseconds: 180),
@@ -4217,7 +4973,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         children: <Widget>[
           _topBar(),
           const Spacer(),
-          if (c != null && c.value.isInitialized) _playRow(c),
+          if (c != null && c.value.isInitialized) _controles(c),
           const Spacer(),
           if (c != null && c.value.isInitialized && !widget.live) _seekBar(c),
           if (widget.live) const SizedBox(height: 14),
@@ -4242,15 +4998,17 @@ class _PlayerScreenState extends State<PlayerScreen> {
               style: const TextStyle(fontWeight: FontWeight.w600),
             ),
           ),
-          _qualityBtn(),
+          _botaoQualidade(),
+          _botaoAudio(),
+          _botaoLegenda(),
           if (widget.provider.isNotEmpty)
             Padding(
-              padding: const EdgeInsets.only(right: 10),
+              padding: const EdgeInsets.only(right: 8),
               child: Text(widget.provider,
                   style: const TextStyle(fontSize: 11, color: Colors.white54)),
             ),
           IconButton(
-            tooltip: 'WebView',
+            tooltip: 'Abrir no site (fallback)',
             icon: const Icon(Icons.language),
             onPressed: _openWeb,
           ),
@@ -4259,7 +5017,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     );
   }
 
-  Widget _pill(String t) {
+  Widget _pill(String t, IconData icone) {
     return Container(
       margin: const EdgeInsets.only(right: 6),
       padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
@@ -4271,7 +5029,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: <Widget>[
-          const Icon(Icons.hd_outlined, size: 12, color: kGold),
+          Icon(icone, size: 12, color: kGold),
           const SizedBox(width: 4),
           Text(t,
               style: const TextStyle(
@@ -4281,8 +5039,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
     );
   }
 
-  Widget _qualityBtn() {
-    if (widget.live || _variants.isEmpty) return _pill(_qualityLabel);
+  Widget _botaoQualidade() {
+    if (widget.live || _variants.isEmpty) {
+      return _pill(_qualityLabel, Icons.hd_outlined);
+    }
     return PopupMenuButton<int>(
       tooltip: 'Qualidade',
       onSelected: (int v) {
@@ -4294,36 +5054,87 @@ class _PlayerScreenState extends State<PlayerScreen> {
           });
           _open(widget.url);
         } else {
-          _switchTo(_variants[v]);
+          _trocarQualidade(_variants[v]);
         }
       },
       itemBuilder: (BuildContext c) {
         final List<PopupMenuEntry<int>> items = <PopupMenuEntry<int>>[
-          const PopupMenuItem<int>(
-              value: -1, child: Text('AUTO (adaptativo)')),
+          const PopupMenuItem<int>(value: -1, child: Text('AUTO (adaptativo)')),
         ];
         for (int i = _variants.length - 1; i >= 0; i--) {
-          items.add(PopupMenuItem<int>(
-              value: i, child: Text(_variants[i].label)));
+          items.add(
+              PopupMenuItem<int>(value: i, child: Text(_variants[i].label)));
         }
         return items;
       },
-      child: _pill(_qualityLabel),
+      child: _pill(_qualityLabel, Icons.hd_outlined),
     );
   }
 
-  Widget _playRow(VideoPlayerController c) {
+  Widget _botaoAudio() {
+    final String rotulo = _audioSel >= 0 && _audioSel < _audios.length
+        ? _audios[_audioSel].name
+        : 'AUDIO';
+    if (_audios.isEmpty) return _pill(rotulo, Icons.audiotrack);
+    return PopupMenuButton<int>(
+      tooltip: 'Idioma / Audio',
+      onSelected: (int v) => _trocarAudio(_audios[v]),
+      itemBuilder: (BuildContext c) => <PopupMenuEntry<int>>[
+        for (int i = 0; i < _audios.length; i++)
+          PopupMenuItem<int>(
+            value: i,
+            child: Text('${_audios[i].name}  ${_audios[i].lang}'),
+          ),
+      ],
+      child: _pill(rotulo, Icons.audiotrack),
+    );
+  }
+
+  Widget _botaoLegenda() {
+    final bool on = _subSel >= 0 && _subSel < _subs.length;
+    final String rotulo =
+        on ? 'LEG: ${_subs[_subSel].name}' : 'LEGENDAS';
+    if (_subs.isEmpty) return _pill(rotulo, Icons.subtitles_outlined);
+    return PopupMenuButton<int>(
+      tooltip: 'Legendas',
+      onSelected: (int v) {
+        if (v < 0) {
+          setState(() {
+            _subSel = -1;
+            _cues = <Cue>[];
+            _cue = null;
+          });
+          return;
+        }
+        _trocarLegenda(_subs[v]);
+      },
+      itemBuilder: (BuildContext c) => <PopupMenuEntry<int>>[
+        const PopupMenuItem<int>(value: -1, child: Text('DESLIGADAS')),
+        for (int i = 0; i < _subs.length; i++)
+          PopupMenuItem<int>(
+            value: i,
+            child: Text('${_subs[i].name}  ${_subs[i].lang}'),
+          ),
+      ],
+      child: _pill(rotulo, Icons.subtitles_outlined),
+    );
+  }
+
+  Widget _controles(VideoPlayerController c) {
     return Row(
       mainAxisAlignment: MainAxisAlignment.center,
       children: <Widget>[
         IconButton(
+          tooltip: 'Assistir do comeco',
+          iconSize: 32,
+          icon: const Icon(Icons.restart_alt),
+          onPressed: _doComeco,
+        ),
+        const SizedBox(width: 14),
+        IconButton(
           iconSize: 34,
           icon: const Icon(Icons.replay_10),
-          onPressed: () {
-            final Duration p = c.value.position - const Duration(seconds: 10);
-            c.seekTo(p < Duration.zero ? Duration.zero : p);
-            _scheduleHide();
-          },
+          onPressed: () => _pular(-10),
         ),
         const SizedBox(width: 10),
         IconButton(
@@ -4345,9 +5156,23 @@ class _PlayerScreenState extends State<PlayerScreen> {
         IconButton(
           iconSize: 34,
           icon: const Icon(Icons.forward_10),
+          onPressed: () => _pular(10),
+        ),
+        const SizedBox(width: 14),
+        IconButton(
+          tooltip: 'Legendas',
+          iconSize: 30,
+          icon: Icon(_subSel >= 0
+              ? Icons.closed_caption
+              : Icons.closed_caption_outlined),
           onPressed: () {
-            c.seekTo(c.value.position + const Duration(seconds: 10));
-            _scheduleHide();
+            if (_subs.isEmpty) {
+              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                  duration: Duration(seconds: 2),
+                  content: Text('Este stream nao informa faixas de legenda.')));
+              return;
+            }
+            _trocarLegenda(_subs[(_subSel + 1) % _subs.length]);
           },
         ),
       ],
@@ -4362,7 +5187,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
       child: Row(
         children: <Widget>[
-          Text(_fmtSeg(c.value.position.inSeconds),
+          Text(fmtSeg(c.value.position.inSeconds),
               style: const TextStyle(fontSize: 12)),
           Expanded(
             child: Slider(
@@ -4376,7 +5201,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
               onChangeEnd: (double _) => _save(),
             ),
           ),
-          Text(_fmtSeg(c.value.duration.inSeconds),
+          Text(fmtSeg(c.value.duration.inSeconds),
               style: const TextStyle(fontSize: 12)),
         ],
       ),
@@ -4427,43 +5252,67 @@ class TrailerView extends StatefulWidget {
 }
 
 class _TrailerViewState extends State<TrailerView> {
-  late final WebViewController _ctl;
+  WebViewController? _ctl;
 
   @override
   void initState() {
     super.initState();
-    _ctl = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setBackgroundColor(Colors.black)
-      ..setNavigationDelegate(
-        NavigationDelegate(
-          onPageFinished: (String _) => _nudge(),
-        ),
-      )
-      ..loadRequest(Uri.parse(
+    WidgetsBinding.instance.addPostFrameCallback((_) => _montar());
+  }
+
+  void _montar() {
+    try {
+      final WebViewController ctl = WebViewController();
+      ctl.setJavaScriptMode(JavaScriptMode.unrestricted);
+      ctl.setBackgroundColor(Colors.black);
+      ctl.setNavigationDelegate(
+        NavigationDelegate(onPageFinished: (String _) => _nudge()),
+      );
+      ctl.loadRequest(Uri.parse(
           'https://www.youtube.com/embed/${widget.videoKey}?autoplay=1&playsinline=1&rel=0&modestbranding=1'));
+      if (mounted) setState(() => _ctl = ctl);
+    } catch (_) {
+      if (mounted) setState(() => _ctl = null);
+    }
   }
 
   Future<void> _nudge() async {
+    final WebViewController? ctl = _ctl;
+    if (ctl == null) return;
     const String js =
         "try{var v=document.querySelector('video');if(v){v.play();}}catch(e){}";
     try {
-      await _ctl.runJavaScript(js);
+      await ctl.runJavaScript(js);
     } catch (_) {}
     await Future<void>.delayed(const Duration(milliseconds: 900));
     try {
-      await _ctl.runJavaScript(js);
+      await ctl.runJavaScript(js);
     } catch (_) {}
   }
 
   @override
-  Widget build(BuildContext context) => WebViewWidget(controller: _ctl);
+  Widget build(BuildContext context) {
+    final WebViewController? ctl = _ctl;
+    if (ctl == null) {
+      return const ColoredBox(
+        color: Colors.black,
+        child: Center(child: CircularProgressIndicator()),
+      );
+    }
+    return WebViewWidget(controller: ctl);
+  }
 }
 
 class WebScreen extends StatefulWidget {
   final String url;
   final String title;
-  const WebScreen({super.key, required this.url, required this.title});
+  final String provider;
+  const WebScreen({
+    super.key,
+    required this.url,
+    required this.title,
+    this.provider = '',
+  });
 
   @override
   State<WebScreen> createState() => _WebScreenState();
@@ -4473,6 +5322,7 @@ class _WebScreenState extends State<WebScreen> {
   WebViewController? _ctl;
   int _progress = 0;
   bool _ui = true;
+  String _falha = '';
 
   @override
   void initState() {
@@ -4480,16 +5330,26 @@ class _WebScreenState extends State<WebScreen> {
     try {
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     } catch (_) {}
-    final WebViewController ctl = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setBackgroundColor(Colors.black)
-      ..setNavigationDelegate(
+    WidgetsBinding.instance.addPostFrameCallback((_) => _montar());
+  }
+
+  void _montar() {
+    try {
+      final WebViewController ctl = WebViewController();
+      ctl.setJavaScriptMode(JavaScriptMode.unrestricted);
+      ctl.setBackgroundColor(Colors.black);
+      ctl.setNavigationDelegate(
         NavigationDelegate(
           onProgress: (int p) {
             if (mounted) setState(() => _progress = p);
           },
           onPageStarted: (String _) => _inject(),
           onPageFinished: (String _) => _inject(),
+          onWebResourceError: (WebResourceError e) {
+            if (mounted && e.isForMainFrame == true) {
+              setState(() => _falha = e.description);
+            }
+          },
           onNavigationRequest: (NavigationRequest req) {
             final String url = req.url;
             if (url.startsWith('about:') ||
@@ -4507,9 +5367,12 @@ class _WebScreenState extends State<WebScreen> {
             return NavigationDecision.navigate;
           },
         ),
-      )
-      ..loadRequest(Uri.parse(widget.url));
-    _ctl = ctl;
+      );
+      ctl.loadRequest(Uri.parse(widget.url));
+      if (mounted) setState(() => _ctl = ctl);
+    } catch (e) {
+      if (mounted) setState(() => _falha = e.toString());
+    }
   }
 
   Future<void> _inject() async {
@@ -4537,10 +5400,41 @@ class _WebScreenState extends State<WebScreen> {
       backgroundColor: Colors.black,
       body: Stack(
         children: <Widget>[
-          if (ctl == null)
-            const Center(child: CircularProgressIndicator())
+          if (ctl != null)
+            WebViewWidget(controller: ctl)
           else
-            WebViewWidget(controller: ctl),
+            Center(
+              child: Padding(
+                padding: const EdgeInsets.all(26),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    if (_falha.isEmpty)
+                      const CircularProgressIndicator()
+                    else ...<Widget>[
+                      const Icon(Icons.public_off, color: kGold, size: 44),
+                      const SizedBox(height: 12),
+                      Text(_falha,
+                          textAlign: TextAlign.center,
+                          maxLines: 3,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              fontSize: 11, color: Colors.white54)),
+                      const SizedBox(height: 12),
+                      TextButton(
+                        onPressed: _montar,
+                        child: const Text('Tentar novamente'),
+                      ),
+                    ],
+                    const SizedBox(height: 18),
+                    SelectableText(widget.url,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                            fontSize: 10.5, color: Colors.white38)),
+                  ],
+                ),
+              ),
+            ),
           if (_progress < 100)
             Positioned(
               top: 0,
