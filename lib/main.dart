@@ -1461,59 +1461,83 @@ Future<void> openPlayer(
 
 Future<void> showTrailer(
     BuildContext context, String videoKey, String title) async {
-  await showGeneralDialog<void>(
-    context: context,
-    barrierDismissible: true,
-    barrierLabel: 'Trailer',
-    barrierColor: Colors.black.withValues(alpha: 0.86),
-    transitionDuration: const Duration(milliseconds: 220),
-    pageBuilder: (BuildContext ctx, Animation<double> a, Animation<double> b) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: <Widget>[
-              Row(
-                children: <Widget>[
-                  const Icon(Icons.movie_creation_outlined, color: kGold),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(title,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(fontWeight: FontWeight.w700)),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.close),
-                    onPressed: () => Navigator.of(ctx).pop(),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 6),
-              AspectRatio(
-                aspectRatio: 16 / 9,
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(12),
-                  child: TrailerView(videoKey: videoKey),
+  try {
+    await SystemChrome.setPreferredOrientations(
+      const <DeviceOrientation>[
+        DeviceOrientation.portraitUp,
+        DeviceOrientation.landscapeLeft,
+        DeviceOrientation.landscapeRight,
+      ],
+    );
+    await showGeneralDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: 'Trailer',
+      barrierColor: Colors.black.withValues(alpha: 0.86),
+      transitionDuration: const Duration(milliseconds: 220),
+      pageBuilder: (BuildContext ctx, Animation<double> a, Animation<double> b) {
+        return Center(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                Row(
+                  children: <Widget>[
+                    const Icon(Icons.movie_creation_outlined, color: kGold),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontWeight: FontWeight.w700)),
+                    ),
+                    IconButton(
+                      tooltip: 'Paisagem',
+                      icon: const Icon(Icons.screen_rotation),
+                      onPressed: () => SystemChrome.setPreferredOrientations(
+                        const <DeviceOrientation>[
+                          DeviceOrientation.landscapeLeft,
+                          DeviceOrientation.landscapeRight,
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close),
+                      onPressed: () => Navigator.of(ctx).pop(),
+                    ),
+                  ],
                 ),
-              ),
-            ],
+                const SizedBox(height: 6),
+                AspectRatio(
+                  aspectRatio: 16 / 9,
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: TrailerView(videoKey: videoKey),
+                  ),
+                ),
+              ],
+            ),
           ),
-        ),
-      );
-    },
-    transitionBuilder: (BuildContext ctx, Animation<double> a,
-        Animation<double> b, Widget child) {
-      return FadeTransition(
-        opacity: a,
-        child: ScaleTransition(
-          scale: Tween<double>(begin: 0.94, end: 1.0).animate(a),
-          child: child,
-        ),
-      );
-    },
-  );
+        );
+      },
+      transitionBuilder: (BuildContext ctx, Animation<double> a,
+          Animation<double> b, Widget child) {
+        return FadeTransition(
+          opacity: a,
+          child: ScaleTransition(
+            scale: Tween<double>(begin: 0.94, end: 1.0).animate(a),
+            child: child,
+          ),
+        );
+      },
+    );
+  } finally {
+    await SystemChrome.setPreferredOrientations(
+      const <DeviceOrientation>[DeviceOrientation.portraitUp],
+    );
+    await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+  }
 }
 
 // ======================= SCROLL PARA WEB =============================
