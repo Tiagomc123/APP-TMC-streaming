@@ -104,6 +104,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:video_player/video_player.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 // ======================= CONFIGURACAO ================================
 String tmdbApiKey = "__TMDB_KEY__";
@@ -1541,59 +1542,83 @@ Future<void> openPlayer(
 
 Future<void> showTrailer(
     BuildContext context, String videoKey, String title) async {
-  await showGeneralDialog<void>(
-    context: context,
-    barrierDismissible: true,
-    barrierLabel: 'Trailer',
-    barrierColor: Colors.black.withValues(alpha: 0.86),
-    transitionDuration: const Duration(milliseconds: 220),
-    pageBuilder: (BuildContext ctx, Animation<double> a, Animation<double> b) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: <Widget>[
-              Row(
-                children: <Widget>[
-                  const Icon(Icons.movie_creation_outlined, color: kGold),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(title,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(fontWeight: FontWeight.w700)),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.close),
-                    onPressed: () => Navigator.of(ctx).pop(),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 6),
-              AspectRatio(
-                aspectRatio: 16 / 9,
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(12),
-                  child: TrailerView(videoKey: videoKey),
+  try {
+    await SystemChrome.setPreferredOrientations(
+      const <DeviceOrientation>[
+        DeviceOrientation.portraitUp,
+        DeviceOrientation.landscapeLeft,
+        DeviceOrientation.landscapeRight,
+      ],
+    );
+    await showGeneralDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: 'Trailer',
+      barrierColor: Colors.black.withValues(alpha: 0.86),
+      transitionDuration: const Duration(milliseconds: 220),
+      pageBuilder: (BuildContext ctx, Animation<double> a, Animation<double> b) {
+        return Center(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                Row(
+                  children: <Widget>[
+                    const Icon(Icons.movie_creation_outlined, color: kGold),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontWeight: FontWeight.w700)),
+                    ),
+                    IconButton(
+                      tooltip: 'Paisagem',
+                      icon: const Icon(Icons.screen_rotation),
+                      onPressed: () => SystemChrome.setPreferredOrientations(
+                        const <DeviceOrientation>[
+                          DeviceOrientation.landscapeLeft,
+                          DeviceOrientation.landscapeRight,
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close),
+                      onPressed: () => Navigator.of(ctx).pop(),
+                    ),
+                  ],
                 ),
-              ),
-            ],
+                const SizedBox(height: 6),
+                AspectRatio(
+                  aspectRatio: 16 / 9,
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: TrailerView(videoKey: videoKey),
+                  ),
+                ),
+              ],
+            ),
           ),
-        ),
-      );
-    },
-    transitionBuilder: (BuildContext ctx, Animation<double> a,
-        Animation<double> b, Widget child) {
-      return FadeTransition(
-        opacity: a,
-        child: ScaleTransition(
-          scale: Tween<double>(begin: 0.94, end: 1.0).animate(a),
-          child: child,
-        ),
-      );
-    },
-  );
+        );
+      },
+      transitionBuilder: (BuildContext ctx, Animation<double> a,
+          Animation<double> b, Widget child) {
+        return FadeTransition(
+          opacity: a,
+          child: ScaleTransition(
+            scale: Tween<double>(begin: 0.94, end: 1.0).animate(a),
+            child: child,
+          ),
+        );
+      },
+    );
+  } finally {
+    await SystemChrome.setPreferredOrientations(
+      const <DeviceOrientation>[DeviceOrientation.portraitUp],
+    );
+    await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+  }
 }
 
 // ======================= SCROLL PARA WEB =============================
@@ -5380,6 +5405,7 @@ class TrailerView extends StatefulWidget {
 
 class _TrailerViewState extends State<TrailerView> {
   WebViewController? _ctl;
+  String? _error;
 
   @override
   void initState() {
@@ -5387,46 +5413,93 @@ class _TrailerViewState extends State<TrailerView> {
     WidgetsBinding.instance.addPostFrameCallback((_) => _montar());
   }
 
-  void _montar() {
+  Future<void> _montar() async {
+    if (!RegExp(r'^[A-Za-z0-9_-]{11}$').hasMatch(widget.videoKey)) {
+      if (mounted) setState(() => _error = 'ID do trailer invalido.');
+      return;
+    }
     try {
       final WebViewController ctl = WebViewController();
-      ctl.setJavaScriptMode(JavaScriptMode.unrestricted);
-      ctl.setBackgroundColor(Colors.black);
-      ctl.setNavigationDelegate(
-        NavigationDelegate(onPageFinished: (String _) => _nudge()),
-      );
-      ctl.loadRequest(Uri.parse(
-          'https://www.youtube.com/embed/${widget.videoKey}?autoplay=1&playsinline=1&rel=0&modestbranding=1'));
+      await ctl.setJavaScriptMode(JavaScriptMode.unrestricted);
+      await ctl.setBackgroundColor(Colors.black);
+      await ctl.setNavigationDelegate(NavigationDelegate(
+        onWebResourceError: (WebResourceError e) {
+          if (mounted && e.isForMainFrame == true) {
+            setState(() => _error = 'O YouTube nao conseguiu carregar este trailer.');
+          }
+        },
+      ));
+      final String id = widget.videoKey;
+      await ctl.loadHtmlString('''
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden}
+iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
+</style>
+</head>
+<body>
+<iframe
+ src="https://www.youtube-nocookie.com/embed/$id?playsinline=1&rel=0"
+ title="Trailer"
+ allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
+ allowfullscreen
+ referrerpolicy="strict-origin-when-cross-origin"></iframe>
+</body>
+</html>
+''');
       if (mounted) setState(() => _ctl = ctl);
     } catch (_) {
-      if (mounted) setState(() => _ctl = null);
+      if (mounted) setState(() => _error = 'Falha ao abrir o trailer.');
     }
   }
 
-  Future<void> _nudge() async {
-    final WebViewController? ctl = _ctl;
-    if (ctl == null) return;
-    const String js =
-        "try{var v=document.querySelector('video');if(v){v.play();}}catch(e){}";
+  Future<void> _abrirNoYouTube() async {
+    final Uri uri = Uri.https('www.youtube.com', '/watch', {'v': widget.videoKey});
     try {
-      await ctl.runJavaScript(js);
-    } catch (_) {}
-    await Future<void>.delayed(const Duration(milliseconds: 900));
-    try {
-      await ctl.runJavaScript(js);
+      if (await canLaunchUrl(uri)) {
+        await launchUrl(uri, mode: LaunchMode.externalApplication);
+      }
     } catch (_) {}
   }
 
   @override
   Widget build(BuildContext context) {
     final WebViewController? ctl = _ctl;
-    if (ctl == null) {
-      return const ColoredBox(
-        color: Colors.black,
-        child: Center(child: CircularProgressIndicator()),
-      );
-    }
-    return WebViewWidget(controller: ctl);
+    return ColoredBox(
+      color: Colors.black,
+      child: Stack(
+        fit: StackFit.expand,
+        children: <Widget>[
+          if (ctl != null)
+            WebViewWidget(controller: ctl)
+          else
+            Center(
+              child: Text(
+                _error ?? 'Carregando trailer...',
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.white),
+              ),
+            ),
+          Positioned(
+            right: 4,
+            bottom: 4,
+            child: TextButton.icon(
+              onPressed: _abrirNoYouTube,
+              icon: const Icon(Icons.open_in_new, size: 16),
+              label: const Text('Abrir no YouTube'),
+              style: TextButton.styleFrom(
+                backgroundColor: Colors.black87,
+                foregroundColor: Colors.white,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 
