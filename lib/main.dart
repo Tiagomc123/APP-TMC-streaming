@@ -1929,7 +1929,30 @@ class _LoginScreenState extends State<LoginScreen> {
                           fontSize: 11,
                           color: Colors.white38,
                           letterSpacing: 1)),
-                  const SizedBox(height: 22),
+                  const SizedBox(height: 16),
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton.icon(
+                      onPressed: _busy ? null : _continueOffline,
+                      icon: const Icon(Icons.phone_android),
+                      label: const Text(
+                        'ENTRAR SEM CONTA',
+                        style: TextStyle(fontWeight: FontWeight.w900),
+                      ),
+                      style: FilledButton.styleFrom(
+                        backgroundColor: kGold,
+                        foregroundColor: Colors.black,
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 5),
+                  const Text(
+                    'Sem cadastro. Favoritos e historico salvos neste navegador.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: Colors.white54, fontSize: 11),
+                  ),
+                  const SizedBox(height: 18),
                   Card(
                     color: kSurface,
                     shape: RoundedRectangleBorder(
@@ -2042,34 +2065,6 @@ class _LoginScreenState extends State<LoginScreen> {
                         ],
                       ),
                     ),
-                  ),
-                  const SizedBox(height: 12),
-                  const Text(
-                    'Prefere nao criar conta?',
-                    style: TextStyle(
-                        color: Colors.white70,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600),
-                  ),
-                  const SizedBox(height: 6),
-                  SizedBox(
-                    width: double.infinity,
-                    child: OutlinedButton.icon(
-                      onPressed: _busy ? null : _continueOffline,
-                      icon: const Icon(Icons.phone_android),
-                      label: const Text('CONTINUAR SEM CONTA'),
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: kGold,
-                        side: const BorderSide(color: kGold),
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  const Text(
-                    'Favoritos e historico ficam salvos localmente neste aparelho.',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(color: Colors.white38, fontSize: 11),
                   ),
                   if (_contas.isNotEmpty) ...<Widget>[
                     const SizedBox(height: 16),
