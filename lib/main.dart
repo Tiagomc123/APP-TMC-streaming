@@ -33,7 +33,9 @@ import 'tmc_frame_stub.dart' if (dart.library.html) 'tmc_frame_web.dart';
 // A chave TMDB fica guardada nos Secrets da Edge Function do Supabase.
 // O app nunca deve armazenar a chave privada do TMDB.
 const String kTmdbBase =
-    'https://npcimvdvmuyflclptesh.supabase.co/functions/v1/tmdb-proxy';
+    'https://xjqdiulxrprxegfrufyf.supabase.co/functions/v1/tmdb-proxy';
+const String kSupabasePublishableKey =
+    'sb_publishable_XyCk8TPrdGOzUrrr-59PpQ__dBWOFb9';
 const String kTmdbImg = 'https://image.tmdb.org/t/p';
 
 /// UA de Chrome mobile REAL (sem o marcador 'wv' do Android WebView).
@@ -726,7 +728,10 @@ class TmdbService {
     if (q != null) params.addAll(q);
     final Uri uri = Uri.parse(kTmdbBase).replace(queryParameters: params);
     final http.Response res =
-        await http.get(uri).timeout(const Duration(seconds: 25));
+        await http.get(
+          uri,
+          headers: <String, String>{'apikey': kSupabasePublishableKey},
+        ).timeout(const Duration(seconds: 25));
     if (res.statusCode == 401 || res.statusCode == 403) {
       throw TmdbException(
           'O Supabase/TMDB recusou a consulta (HTTP ${res.statusCode}). Confira o segredo TMDB_API_KEY no Supabase.');
