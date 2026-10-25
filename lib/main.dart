@@ -1541,7 +1541,8 @@ Future<void> openPlayer(
 }
 
 // ============================ TRAILER ================================
-/// Player inline do YouTube usando o pacote youtube_player_flutter.
+/// Player de trailer separado por plataforma:
+/// Web usa iframe HTML real; Android/iOS usam o player nativo.
 class TrailerPlayer extends StatefulWidget {
   final String videoKey;
   const TrailerPlayer({super.key, required this.videoKey});
@@ -1551,25 +1552,28 @@ class TrailerPlayer extends StatefulWidget {
 }
 
 class _TrailerPlayerState extends State<TrailerPlayer> {
-  late final YoutubePlayerController _controller;
+  YoutubePlayerController? _controller;
   bool _paisagem = true;
 
   @override
   void initState() {
     super.initState();
-    _controller = YoutubePlayerController(
-      initialVideoId: widget.videoKey,
-      flags: const YoutubePlayerFlags(
-        autoPlay: true,
-        mute: false,
-        enableCaption: true,
-        hideControls: false,
-        controlsVisibleAtStart: true,
-      ),
-    );
+    if (!kIsWeb) {
+      _controller = YoutubePlayerController(
+        initialVideoId: widget.videoKey,
+        flags: const YoutubePlayerFlags(
+          autoPlay: true,
+          mute: false,
+          enableCaption: true,
+          hideControls: false,
+          controlsVisibleAtStart: true,
+        ),
+      );
+    }
   }
 
   Future<void> _alternarTela() async {
+    if (kIsWeb) return;
     if (_paisagem) {
       await Tela.voltarRetrato();
       if (mounted) setState(() => _paisagem = false);
@@ -1581,18 +1585,24 @@ class _TrailerPlayerState extends State<TrailerPlayer> {
 
   @override
   void dispose() {
-    _controller.pause();
-    _controller.dispose();
+    _controller?.pause();
+    _controller?.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    if (kIsWeb) {
+      return TmcFrame(
+        url: 'https://www.youtube.com/embed/${Uri.encodeComponent(widget.videoKey)}?autoplay=1&playsinline=1&rel=0',
+      );
+    }
+    final YoutubePlayerController controller = _controller!;
     return Stack(
       fit: StackFit.expand,
       children: <Widget>[
         YoutubePlayer(
-          controller: _controller,
+          controller: controller,
           showVideoProgressIndicator: true,
           progressIndicatorColor: kGold,
           progressColors: const ProgressBarColors(
@@ -3537,6 +3547,20 @@ class DiscoverTab extends StatefulWidget {
 
 class _DiscoverTabState extends State<DiscoverTab> {
   int _g = 0;
+  late Future<List<MediaItem>> _featuredFuture;
+
+  bool get _isSeries => widget.chips.isNotEmpty &&
+      widget.chips.first.path.contains('/tv');
+
+  @override
+  void initState() {
+    super.initState();
+    _featuredFuture = _loadFeatured();
+  }
+
+  Future<List<MediaItem>> _loadFeatured() => _isSeries
+      ? TmdbService.popularTv(pages: 1)
+      : TmdbService.popularMovies(pages: 1);
 
   Future<List<MediaItem>> _load(int page) {
     final GenreChip g = widget.chips[_g];
@@ -3552,11 +3576,119 @@ class _DiscoverTabState extends State<DiscoverTab> {
     return TmdbService.page(g.path, g.path.contains('/tv'), page, q);
   }
 
+  Widget _featuredBanners() {
+    return FutureBuilder<List<MediaItem>>(
+      future: _featuredFuture,
+      builder: (BuildContext context, AsyncSnapshot<List<MediaItem>> snapshot) {
+        final List<MediaItem> items = (snapshot.data ?? <MediaItem>[])
+            .where((MediaItem item) => item.backdropUrl.isNotEmpty)
+            .take(10)
+            .toList();
+        if (items.isEmpty) return const SizedBox(height: 8);
+        return SizedBox(
+          height: 192,
+          child: ListView.builder(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            itemCount: items.length,
+            itemBuilder: (BuildContext context, int index) {
+              final MediaItem item = items[index];
+              return Container(
+                width: MediaQuery.sizeOf(context).width * 0.78,
+                constraints: const BoxConstraints(maxWidth: 440),
+                margin: const EdgeInsets.only(right: 10),
+                child: Material(
+                  color: kSurface,
+                  borderRadius: BorderRadius.circular(14),
+                  clipBehavior: Clip.antiAlias,
+                  child: InkWell(
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => DetailsScreen(item: item),
+                      ),
+                    ),
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: <Widget>[
+                        Image.network(
+                          item.backdropUrl,
+                          fit: BoxFit.cover,
+                          errorBuilder: (BuildContext c, Object e, StackTrace? st) =>
+                              Container(color: kSurface),
+                        ),
+                        const DecoratedBox(
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              begin: Alignment.topCenter,
+                              end: Alignment.bottomCenter,
+                              colors: <Color>[Colors.transparent, Color(0xE6000000)],
+                            ),
+                          ),
+                        ),
+                        Positioned(
+                          left: 14,
+                          right: 12,
+                          bottom: 12,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: <Widget>[
+                              Text(
+                                index == 0 ? 'DESTAQUE' : 'EM ALTA',
+                                style: const TextStyle(
+                                  color: kGold,
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w900,
+                                  letterSpacing: 1.2,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                item.title,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.w900,
+                                ),
+                              ),
+                              const SizedBox(height: 6),
+                              Row(
+                                children: <Widget>[
+                                  const Icon(Icons.star, color: kGold, size: 14),
+                                  const SizedBox(width: 4),
+                                  Text(item.rating.toStringAsFixed(1),
+                                      style: const TextStyle(fontSize: 11)),
+                                  const Spacer(),
+                                  const Icon(Icons.play_circle_fill, size: 24),
+                                  const SizedBox(width: 4),
+                                  const Text('VER DETALHES',
+                                      style: TextStyle(
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.w800)),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final GenreChip g = widget.chips[_g];
     return Column(
       children: <Widget>[
+        _featuredBanners(),
         SizedBox(
           height: 50,
           child: ListView.builder(
