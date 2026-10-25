@@ -1,4 +1,4 @@
-name: mc
+﻿name: mc
 description: "A new Flutter project."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
@@ -42,6 +42,7 @@ dependencies:
   shared_preferences: ^2.5.6
   path_provider: ^2.1.6
   webview_flutter_web: ^0.2.3+4
+  webview_flutter_android: ^4.14.1
   url_launcher: ^6.3.2
 
 dev_dependencies:

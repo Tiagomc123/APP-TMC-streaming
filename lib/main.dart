@@ -1,11 +1,12 @@
 ﻿// =====================================================================
-//  TMC  -  AGREGADOR DE STREAMING                build 4.0  "TMC PRIME"
+//  TMC  -  AGREGADOR DE STREAMING                build 6.0  "TMC PLAYER"
 //  ------------------------------------------------------------------
-//  * Player nativo imersivo: +10s / -10s / do comeco / audio / legendas
-//  * Resolver resiliente SuperFlixAPI (JSON + deep-scan de .m3u8)
-//  * Login local com E-mail + Dica de Senha + recuperacao offline
-//  * Abas infinitas PT-BR, scroll por mouse, limpeza rigida de cache
-//  Alvos: Flutter Web / Android Mobile / Android TV (TV Box)
+//  * Trailer: WebView tunada (Referer/Origin) = sem Erro 153
+//  * Trailer: expandir forca LANDSCAPE, fechar volta para PORTRAIT
+//  * WebView: UA Chrome sem 'wv', JS, DOM Storage, MixedContent,
+//    cookies de terceiros e autoplay -> passa o Cloudflare
+//  * Web: <iframe> HTML real | Android: player nativo HLS
+//  * Contas locais (e-mail + dica), favoritos, historico, resume
 //  >>>>> COLE A SUA CHAVE DO TMDB NA LINHA MARCADA ABAIXO <<<<<
 // =====================================================================
 
@@ -23,15 +24,23 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:video_player/video_player.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'package:url_launcher/url_launcher.dart';
+
+import 'tmc_frame_stub.dart' if (dart.library.html) 'tmc_frame_web.dart';
 
 // ======================= CONFIGURACAO ================================
 String tmdbApiKey = "SUA_CHAVE_AQUI";
 
 const String kTmdbBase = 'https://api.themoviedb.org/3';
 const String kTmdbImg = 'https://image.tmdb.org/t/p';
+
+/// UA de Chrome mobile REAL (sem o marcador 'wv' do Android WebView).
+/// O 'wv' faz o Cloudflare tratar como bot e o YouTube devolver erro 153.
 const String kUserAgent =
-    'Mozilla/5.0 (Linux; Android 11; Android TV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+    'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36';
+
+const String kYtReferer = 'https://www.youtube.com/';
 
 const Color kBg = Color(0xFF070A12);
 const Color kSurface = Color(0xFF121826);
@@ -70,15 +79,14 @@ class CacheKeeper {
 
   static void install() {
     final ImageCache c = PaintingBinding.instance.imageCache;
-    c.maximumSize = 130;
-    c.maximumSizeBytes = 56 << 20;
+    c.maximumSize = 120;
+    c.maximumSizeBytes = 48 << 20;
     _timer?.cancel();
     _timer = Timer.periodic(const Duration(seconds: 70), (Timer _) {
       PaintingBinding.instance.imageCache.clearLiveImages();
     });
   }
 
-  /// Descarte total: chamado quando qualquer stream/webview e fechado.
   static void wipe() {
     final ImageCache c = PaintingBinding.instance.imageCache;
     c.clear();
@@ -91,11 +99,54 @@ class CacheKeeper {
   }
 }
 
+// =================== ORIENTACAO (LANDSCAPE / PORTRAIT) ===============
+class Tela {
+  static const List<DeviceOrientation> retrato = <DeviceOrientation>[
+    DeviceOrientation.portraitUp,
+  ];
+  static const List<DeviceOrientation> paisagem = <DeviceOrientation>[
+    DeviceOrientation.landscapeLeft,
+    DeviceOrientation.landscapeRight,
+  ];
+  static const List<DeviceOrientation> livre = <DeviceOrientation>[
+    DeviceOrientation.portraitUp,
+    DeviceOrientation.landscapeLeft,
+    DeviceOrientation.landscapeRight,
+  ];
+
+  static Future<void> permitirGirar() async {
+    try {
+      await SystemChrome.setPreferredOrientations(livre);
+    } catch (_) {}
+  }
+
+  static Future<void> paisagemTotal() async {
+    try {
+      await SystemChrome.setPreferredOrientations(paisagem);
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    } catch (_) {}
+  }
+
+  static Future<void> voltarRetrato() async {
+    try {
+      await SystemChrome.setPreferredOrientations(retrato);
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    } catch (_) {}
+  }
+
+  static Future<void> restaurarApp() async {
+    try {
+      await SystemChrome.setPreferredOrientations(livre);
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    } catch (_) {}
+  }
+}
+
 // ===================== BANCO LOCAL EM ARQUIVO =======================
 class LocalDb {
   static final Map<String, dynamic> root = <String, dynamic>{
     'app': 'TMC',
-    'version': 3,
+    'version': 6,
     'updated': '',
     'users': <String, dynamic>{},
   };
@@ -258,7 +309,7 @@ class Auth {
       RegExp(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$');
 
   static String hash(String u, String p) {
-    final String s = 'tmc|${u.trim().toLowerCase()}|$p|prime';
+    final String s = 'tmc|${u.trim().toLowerCase()}|$p|player';
     int a = 7;
     for (final int c in s.codeUnits) {
       a = ((a * 31) + c) & 0xFFFFFFFF;
@@ -318,8 +369,7 @@ class Auth {
   }
 
   static bool checkHint(String u, String answer) =>
-      LocalDb.hintOf(u).trim().toLowerCase() ==
-      answer.trim().toLowerCase();
+      LocalDb.hintOf(u).trim().toLowerCase() == answer.trim().toLowerCase();
 }
 
 // ============================ MODELOS ================================
@@ -466,51 +516,41 @@ class Channel {
   final String id;
   final String name;
   final String group;
-  final String logo;
 
-  const Channel(this.id, this.name, [this.group = 'ABERTOS', this.logo = '']);
+  const Channel(this.id, this.name, [this.group = 'ABERTOS']);
 
   Map<String, dynamic> toJson() =>
-      <String, dynamic>{'i': id, 'n': name, 'g': group, 'l': logo};
+      <String, dynamic>{'i': id, 'n': name, 'g': group};
 
   static Channel fromJson(Map<String, dynamic> j) => Channel(
-        (j['i'] ?? j['u'] ?? '').toString(),
+        (j['i'] ?? '').toString(),
         (j['n'] ?? '').toString(),
         (j['g'] ?? 'MEUS CANAIS').toString(),
-        (j['l'] ?? '').toString(),
       );
 }
 
 class SportEvent {
   final String title;
-  final String sport;
-  final String competition;
-  final String status;
+  final String sub;
   final String url;
-  final String logo;
 
-  const SportEvent(this.title, this.sport, this.competition, this.status,
-      this.url, this.logo);
+  const SportEvent(this.title, this.sub, this.url);
 }
 
 class HlsVariant {
   final String url;
   final int bandwidth;
   final String label;
-  final String audioGroup;
-  final String subGroup;
 
-  const HlsVariant(this.url, this.bandwidth, this.label, this.audioGroup,
-      this.subGroup);
+  const HlsVariant(this.url, this.bandwidth, this.label);
 }
 
 class HlsMedia {
   final String name;
   final String lang;
   final String url;
-  final bool isAudio;
 
-  const HlsMedia(this.name, this.lang, this.url, this.isAudio);
+  const HlsMedia(this.name, this.lang, this.url);
 }
 
 class Cue {
@@ -745,7 +785,6 @@ class TmdbService {
     return out;
   }
 
-  /// Pagina unica (scroll infinito das abas) - sempre pt-BR.
   static Future<List<MediaItem>> page(
       String path, bool isTv, int page, Map<String, String> q) async {
     try {
@@ -760,9 +799,6 @@ class TmdbService {
 
   static Future<List<MediaItem>> popularMovies({int pages = 3}) =>
       _pages('/movie/popular', false, pages: pages);
-
-  static Future<List<MediaItem>> topMovies({int pages = 1}) =>
-      _pages('/movie/top_rated', false, pages: pages);
 
   static Future<List<MediaItem>> popularTv({int pages = 3}) =>
       _pages('/tv/popular', true, pages: pages);
@@ -849,71 +885,83 @@ class TmdbService {
     final Map<String, dynamic>? v = d['videos'] as Map<String, dynamic>?;
     final List<dynamic> raw =
         (v?['results'] as List<dynamic>?) ?? const <dynamic>[];
-    Map<String, dynamic>? best;
+    Map<String, dynamic>? melhor;
     for (final dynamic e in raw) {
       final Map<String, dynamic> m = e as Map<String, dynamic>;
       if ((m['site'] ?? '') != 'YouTube') continue;
       final String t = (m['type'] ?? '').toString();
       if (t == 'Trailer') {
-        best = m;
+        melhor = m;
         if ((m['official'] ?? false) == true) break;
-      } else if (best == null && t == 'Teaser') {
-        best = m;
+      } else if (melhor == null && t == 'Teaser') {
+        melhor = m;
       }
     }
-    return best?['key']?.toString();
+    return melhor?['key']?.toString();
   }
 }
 
-// =============== SUPERFLIXAPI (rotas JSON oficiais + deep-scan) ======
+// ================ SUPERFLIXAPI - ROTAS + HEADERS DE NAVEGADOR ========
 class SuperFlix {
   static const String base = 'https://superflixapi.fun';
+  static const String parceiro = 'https://pobreflixhd.sbs';
 
-  static Map<String, String> get headers => <String, String>{
-        'User-Agent': kUserAgent,
-        'Accept': 'application/json, text/html, */*',
-      };
+  static String filme(String id) => '$base/filme/$id';
+  static String serie(String id, int s, int e) => '$base/serie/$id/$s/$e';
+  static String canal(String id) => '$base/canal/$id';
 
-  static String filmeUrl(String id) => '$base/filme/$id';
-  static String serieUrl(String id, int s, int e) => '$base/serie/$id/$s/$e';
-  static String canalUrl(String id) => '$base/canal/$id';
+  static String filmeParceiro(String id) => '$parceiro/filme/$id';
+  static String serieParceira(String id, int s, int e) =>
+      '$parceiro/serie/$id/$s/$e';
+  static String canalParceiro(String id) => '$parceiro/canal/$id';
 
-  static List<String> rotas(bool isTv, String id, int s, int e) => isTv
+  static List<String> rotasJson(bool isTv, String id, int s, int e) => isTv
       ? <String>[
-          '${serieUrl(id, s, e)}?format=json',
-          '${serieUrl(id, s, e)}?format=json&type=tmdb',
-          serieUrl(id, s, e),
-          '$base/e/serie/$id/$s/$e',
+          '${serie(id, s, e)}?format=json',
+          '${serie(id, s, e)}?format=json&type=tmdb',
+          serie(id, s, e),
         ]
       : <String>[
-          '${filmeUrl(id)}?format=json',
-          '${filmeUrl(id)}?format=json&type=tmdb',
-          filmeUrl(id),
-          '$base/e/filme/$id',
+          '${filme(id)}?format=json',
+          '${filme(id)}?format=json&type=tmdb',
+          filme(id),
         ];
+
+  /// Headers de navegador real: e isso que faz o Cloudflare liberar.
+  static Map<String, String> headers([String referer = '']) => <String, String>{
+        'User-Agent': kUserAgent,
+        'Accept':
+            'text/html,application/xhtml+xml,application/xml;q=0.9,application/json;q=0.8,image/webp,*/*;q=0.8',
+        'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': referer.isEmpty ? 'none' : 'same-origin',
+        'Referer': referer.isEmpty ? '$base/' : referer,
+        'Origin': referer.isEmpty ? base : referer,
+      };
 
   static Future<http.Response?> get(String url, [String referer = '']) async {
     try {
-      final Map<String, String> h = headers;
-      if (referer.isNotEmpty) h['Referer'] = referer;
       return await http
-          .get(Uri.parse(url), headers: h)
-          .timeout(const Duration(seconds: 16));
+          .get(Uri.parse(url), headers: headers(referer))
+          .timeout(const Duration(seconds: 22));
     } catch (_) {
       return null;
     }
   }
 
-  static String abs(String url, String base) {
+  static String abs(String url, String base0) {
     try {
       if (url.startsWith('//')) return 'https:$url';
-      return Uri.parse(base).resolve(url).toString();
+      return Uri.parse(base0).resolve(url).toString();
     } catch (_) {
       return url;
     }
   }
 
-  /// Varre QUALQUER nivel do JSON procurando um valor que satisfaca o teste.
   static String? deep(dynamic node, bool Function(String) test, [int d = 0]) {
     if (d > 7 || node == null) return null;
     if (node is String) return test(node) ? node : null;
@@ -933,7 +981,6 @@ class SuperFlix {
     return null;
   }
 
-  /// Canais publicos estaveis (JSON oficial).
   static Future<List<Channel>> canais() async {
     final List<Channel> out = <Channel>[];
     final http.Response? r =
@@ -948,14 +995,12 @@ class SuperFlix {
         final String id = (e['id'] ?? '').toString();
         final String name = (e['name'] ?? '').toString();
         if (id.isEmpty || name.isEmpty) continue;
-        out.add(Channel(id, name, (e['category'] ?? 'ABERTOS').toString(),
-            (e['logo_url'] ?? '').toString()));
+        out.add(Channel(id, name, (e['category'] ?? 'ABERTOS').toString()));
       }
     } catch (_) {}
     return out;
   }
 
-  /// Eventos esportivos do dia (JSON oficial).
   static Future<List<SportEvent>> eventos() async {
     final List<SportEvent> out = <SportEvent>[];
     final http.Response? r =
@@ -975,17 +1020,16 @@ class SuperFlix {
           return '';
         }
 
-        final String title = p(<String>['name', 'title', 'match', 'event']);
+        final String titulo = p(<String>['name', 'title', 'match', 'event']);
         final String url =
             p(<String>['play_event_url', 'page_url', 'embed_url', 'url']);
-        if (title.isEmpty || url.isEmpty) continue;
+        if (titulo.isEmpty || url.isEmpty) continue;
         out.add(SportEvent(
-          title,
-          p(<String>['sport', 'modality']),
-          p(<String>['competition', 'league', 'championship']),
-          p(<String>['status']),
+          titulo,
+          <String>[p(<String>['competition', 'league']), p(<String>['sport'])]
+              .where((String s) => s.isNotEmpty)
+              .join(' - '),
           abs(url, base),
-          p(<String>['event_logo', 'image', 'logo_url']),
         ));
       }
     } catch (_) {}
@@ -993,7 +1037,7 @@ class SuperFlix {
   }
 }
 
-// ===================== RESOLVEDORES (FALLBACK) =======================
+// ===================== RESOLVEDORES (ANDROID / TV) ===================
 class Source {
   final String name;
   final List<String> Function(bool isTv, int id, int s, int e) rotas;
@@ -1004,16 +1048,19 @@ class Source {
 
 final List<Source> kSources = <Source>[
   Source('SuperFlixAPI',
-      (bool isTv, int id, int s, int e) => SuperFlix.rotas(isTv, '$id', s, e),
+      (bool isTv, int id, int s, int e) => SuperFlix.rotasJson(isTv, '$id', s, e),
       (bool isTv, int id, int s, int e) =>
-          isTv ? SuperFlix.serieUrl('$id', s, e) : SuperFlix.filmeUrl('$id')),
+          isTv ? SuperFlix.serie('$id', s, e) : SuperFlix.filme('$id')),
   Source(
     'EmbedCine',
     (bool isTv, int id, int s, int e) => <String>[
-      isTv ? 'https://embedcine.com/serie/$id/$s/$e' : 'https://embedcine.com/filme/$id',
+      isTv
+          ? 'https://embedcine.com/serie/$id/$s/$e'
+          : 'https://embedcine.com/filme/$id',
     ],
-    (bool isTv, int id, int s, int e) =>
-        isTv ? 'https://embedcine.com/serie/$id/$s/$e' : 'https://embedcine.com/filme/$id',
+    (bool isTv, int id, int s, int e) => isTv
+        ? 'https://embedcine.com/serie/$id/$s/$e'
+        : 'https://embedcine.com/filme/$id',
   ),
   Source(
     'WarezCDN',
@@ -1036,24 +1083,13 @@ class Resolver {
   static final RegExp _iframe =
       RegExp(r'''<iframe[^>]*src=["']([^"']+)["']''', caseSensitive: false);
 
-  /// Varredura silenciosa via HEAD: confirma se o host esta vivo.
-  static Future<bool> alive(String url) async {
-    try {
-      final http.Response r = await http
-          .head(Uri.parse(url), headers: SuperFlix.headers)
-          .timeout(const Duration(seconds: 7));
-      if (r.statusCode >= 200 && r.statusCode < 400) return true;
-    } catch (_) {}
-    return false;
-  }
-
-  static Future<PlayTarget?> _tentar(Source s, String rota, String page) async {
+  static Future<PlayTarget?> ler(
+      String rota, String provider, String page) async {
     final http.Response? res = await SuperFlix.get(rota, page);
     if (res == null) return null;
     final String body = res.body;
     final String head = body.trimLeft();
 
-    // --- resposta JSON: deep-scan por qualquer .m3u8 / .mp4 ---
     if (head.startsWith('{') || head.startsWith('[')) {
       dynamic j;
       try {
@@ -1064,7 +1100,7 @@ class Resolver {
       final String? m = SuperFlix.deep(j, (String v) => v.contains('.m3u8'));
       if (m != null) {
         return PlayTarget(
-            provider: s.name,
+            provider: provider,
             url: SuperFlix.abs(m, rota),
             direct: true,
             referer: rota,
@@ -1073,7 +1109,7 @@ class Resolver {
       final String? v = SuperFlix.deep(j, (String v) => v.contains('.mp4'));
       if (v != null) {
         return PlayTarget(
-            provider: s.name,
+            provider: provider,
             url: SuperFlix.abs(v, rota),
             direct: true,
             referer: rota,
@@ -1083,10 +1119,13 @@ class Resolver {
           j,
           (String v) =>
               v.startsWith('http') &&
-              (v.contains('/embed') || v.contains('/player') || v.contains('/e/')));
+              (v.contains('/embed') ||
+                  v.contains('/player') ||
+                  v.contains('/e/') ||
+                  v.contains('/canal/')));
       if (pl != null) {
         return PlayTarget(
-            provider: s.name,
+            provider: provider,
             url: SuperFlix.abs(pl, rota),
             direct: false,
             referer: rota,
@@ -1095,26 +1134,24 @@ class Resolver {
       return null;
     }
 
-    // --- resposta HTML: regex direta de .m3u8 ---
     final Match? m = _m3u8.firstMatch(body);
     if (m != null) {
       return PlayTarget(
-          provider: s.name,
+          provider: provider,
           url: m.group(0)!,
           direct: true,
           referer: rota,
           page: page);
     }
 
-    // --- HTML com iframe: segue um nivel ---
     final Match? f = _iframe.firstMatch(body);
     if (f != null) {
       final String src = SuperFlix.abs(f.group(1)!.trim(), rota);
-      final Match? mDireto = _m3u8.firstMatch(src);
-      if (mDireto != null) {
+      final Match? direto = _m3u8.firstMatch(src);
+      if (direto != null) {
         return PlayTarget(
-            provider: s.name,
-            url: mDireto.group(0)!,
+            provider: provider,
+            url: direto.group(0)!,
             direct: true,
             referer: rota,
             page: page);
@@ -1124,7 +1161,7 @@ class Resolver {
         final Match? m2 = _m3u8.firstMatch(r2.body);
         if (m2 != null) {
           return PlayTarget(
-              provider: s.name,
+              provider: provider,
               url: m2.group(0)!,
               direct: true,
               referer: src,
@@ -1133,7 +1170,7 @@ class Resolver {
         final Match? f2 = _iframe.firstMatch(r2.body);
         if (f2 != null) {
           return PlayTarget(
-              provider: s.name,
+              provider: provider,
               url: SuperFlix.abs(f2.group(1)!.trim(), src),
               direct: false,
               referer: rota,
@@ -1141,7 +1178,7 @@ class Resolver {
         }
       }
       return PlayTarget(
-          provider: s.name,
+          provider: provider,
           url: src,
           direct: false,
           referer: rota,
@@ -1151,7 +1188,7 @@ class Resolver {
     final Match? mp4 = _mp4.firstMatch(body);
     if (mp4 != null) {
       return PlayTarget(
-          provider: s.name,
+          provider: provider,
           url: mp4.group(0)!,
           direct: true,
           referer: rota,
@@ -1161,20 +1198,18 @@ class Resolver {
     return null;
   }
 
-  /// Tenta todos os resolvedores: devolve o 1o link direto ou o 1o embed.
   static Future<PlayTarget?> best(bool isTv, int id, int season, int episode,
       {int forced = -1}) async {
-    final List<Source> lista =
-        forced >= 0 && forced < kSources.length
-            ? <Source>[kSources[forced]]
-            : kSources;
+    final List<Source> lista = forced >= 0 && forced < kSources.length
+        ? <Source>[kSources[forced]]
+        : kSources;
     PlayTarget? embed;
     for (final Source s in lista) {
       final String page = s.page(isTv, id, season, episode);
       for (final String rota in s.rotas(isTv, id, season, episode)) {
         PlayTarget? t;
         try {
-          t = await _tentar(s, rota, page);
+          t = await ler(rota, s.name, page);
         } catch (_) {
           t = null;
         }
@@ -1187,6 +1222,14 @@ class Resolver {
     }
     return embed;
   }
+
+  static Future<PlayTarget?> pagina(String url, String provider) async {
+    try {
+      return await ler(url, provider, url);
+    } catch (_) {
+      return null;
+    }
+  }
 }
 
 // ======================= HLS (AUDIO/LEGENDAS) ========================
@@ -1195,7 +1238,7 @@ class Hls {
     try {
       final http.Response r = await http
           .get(Uri.parse(url), headers: h)
-          .timeout(const Duration(seconds: 12));
+          .timeout(const Duration(seconds: 14));
       if (r.statusCode == 200) return r.body;
     } catch (_) {}
     return null;
@@ -1214,7 +1257,7 @@ class Hls {
     return m == null ? 0 : (int.tryParse(m.group(1)!) ?? 0);
   }
 
-  static String _name(String line) {
+  static String _nome(String line) {
     final Match? m = RegExp('NAME="([^"]+)"').firstMatch(line);
     if (m != null) return m.group(1)!;
     final Match? l = RegExp('LANGUAGE="([^"]+)"').firstMatch(line);
@@ -1222,12 +1265,11 @@ class Hls {
     return 'FAIXA';
   }
 
-  static String _group(String line) {
+  static String _grupo(String line) {
     final Match? m = RegExp('GROUP-ID="([^"]+)"').firstMatch(line);
     return m == null ? '' : m.group(1)!;
   }
 
-  /// Le o master playlist e separa faixas de video, audio e legendas.
   static Future<Map<String, dynamic>> parse(
       String url, Map<String, String> headers) async {
     final Map<String, dynamic> out = <String, dynamic>{
@@ -1249,18 +1291,15 @@ class Hls {
         final Match? u = RegExp('URI="([^"]+)"').firstMatch(l);
         final String uri = u == null ? '' : u.group(1)!;
         (out[audio ? 'audios' : 'subs'] as List<HlsMedia>).add(HlsMedia(
-          _name(l),
-          _group(l),
+          _nome(l),
+          _grupo(l),
           uri.isEmpty ? '' : _abs(uri, url),
-          audio,
         ));
         continue;
       }
       if (!l.startsWith('#EXT-X-STREAM-INF')) continue;
       final int bw = _attr(l, 'BANDWIDTH');
       final Match? res = RegExp('RESOLUTION=(\\d+x\\d+)').firstMatch(l);
-      final Match? au = RegExp('AUDIO="([^"]+)"').firstMatch(l);
-      final Match? su = RegExp('SUBTITLES="([^"]+)"').firstMatch(l);
       for (int k = i + 1; k < lines.length; k++) {
         final String n = lines[k].trim();
         if (n.isEmpty || n.startsWith('#')) continue;
@@ -1268,18 +1307,15 @@ class Hls {
           _abs(n, url),
           bw,
           res == null ? '${(bw / 1000).round()}k' : res.group(1)!,
-          au == null ? '' : au.group(1)!,
-          su == null ? '' : su.group(1)!,
         ));
         break;
       }
     }
-    (out['variants'] as List<HlsVariant>)
-        .sort((HlsVariant a, HlsVariant b) => a.bandwidth.compareTo(b.bandwidth));
+    (out['variants'] as List<HlsVariant>).sort(
+        (HlsVariant a, HlsVariant b) => a.bandwidth.compareTo(b.bandwidth));
     return out;
   }
 
-  /// Baixa e converte uma faixa de legenda em cues prontos para exibir.
   static Future<List<Cue>> cues(String url, Map<String, String> headers) async {
     if (url.isEmpty) return <Cue>[];
     String? raw = await _fetch(url, headers);
@@ -1301,8 +1337,7 @@ class Hls {
 
   static List<Cue> parseVtt(String raw) {
     final List<Cue> out = <Cue>[];
-    final String limpo =
-        raw.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+    final String limpo = raw.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
     for (final String bloco in limpo.split('\n\n')) {
       final List<String> linhas = bloco
           .split('\n')
@@ -1363,7 +1398,9 @@ Future<bool> askConfirm(
     builder: (BuildContext ctx) => AlertDialog(
       backgroundColor: kSurface,
       title: Text(title),
-      content: Text(message, style: const TextStyle(color: Colors.white70)),
+      content: SingleChildScrollView(
+        child: Text(message, style: const TextStyle(color: Colors.white70)),
+      ),
       actions: <Widget>[
         TextButton(
           onPressed: () => Navigator.of(ctx).pop(false),
@@ -1399,6 +1436,33 @@ class LoadingDialog extends StatelessWidget {
   }
 }
 
+/// Deixa a WebView identica a um Chrome mobile real.
+/// E isto que faz o Cloudflare liberar e mata o Erro 153 do YouTube.
+Future<void> afinarWebView(WebViewController c) async {
+  if (kIsWeb) return;
+  try {
+    await c.setUserAgent(kUserAgent);
+  } catch (_) {}
+  try {
+    final dynamic p = c.platform;
+    if (p is AndroidWebViewController) {
+      try {
+        await p.setMediaPlaybackRequiresUserGesture(false);
+      } catch (_) {}
+      try {
+        await p.setMixedContentMode(MixedContentMode.alwaysAllow);
+      } catch (_) {}
+      try {
+        final AndroidWebViewCookieManager manager =
+            AndroidWebViewCookieManager(
+          const PlatformWebViewCookieManagerCreationParams(),
+        );
+        await manager.setAcceptThirdPartyCookies(p, true);
+      } catch (_) {}
+    }
+  } catch (_) {}
+}
+
 // =================== NAVEGACAO PARA O PLAYER =========================
 Future<void> openPlayer(
   BuildContext context,
@@ -1408,8 +1472,25 @@ Future<void> openPlayer(
   int forced = -1,
 }) async {
   final NavigatorState nav = Navigator.of(context, rootNavigator: true);
-  final ScaffoldMessengerState messenger = ScaffoldMessenger.of(context);
+  final String paginaOficial = item.isTv
+      ? SuperFlix.serie('${item.id}', season, episode)
+      : SuperFlix.filme('${item.id}');
+  final String paginaParceira = item.isTv
+      ? SuperFlix.serieParceira('${item.id}', season, episode)
+      : SuperFlix.filmeParceiro('${item.id}');
 
+  if (kIsWeb) {
+    nav.push(MaterialPageRoute<void>(
+      builder: (BuildContext _) => FrameScreen(
+        url: paginaParceira,
+        title: item.title,
+        urlAlt: paginaOficial,
+      ),
+    ));
+    return;
+  }
+
+  final ScaffoldMessengerState messenger = ScaffoldMessenger.of(context);
   showDialog<void>(
     context: context,
     barrierDismissible: false,
@@ -1428,14 +1509,15 @@ Future<void> openPlayer(
 
   if (t == null) {
     messenger.showSnackBar(const SnackBar(
-        content: Text('Nenhum servidor respondeu agora. Tente novamente.')));
+        content: Text('Servidor lento. Abrindo o player do site...')));
+    nav.push(MaterialPageRoute<void>(
+      builder: (BuildContext _) =>
+          WebScreen(url: paginaOficial, title: item.title),
+    ));
     return;
   }
 
-  // Web (Chrome) nao roda HLS nativo no <video>: prioriza o embed.
-  final bool usarNativo = t.direct && !kIsWeb;
-
-  if (usarNativo) {
+  if (t.direct) {
     nav.push(MaterialPageRoute<void>(
       builder: (BuildContext _) => PlayerScreen(
         url: t!.url,
@@ -1445,40 +1527,225 @@ Future<void> openPlayer(
         media: item,
         season: season,
         episode: episode,
-        embed: t.page,
+        embed: t.page.isEmpty ? paginaOficial : t.page,
       ),
     ));
   } else {
     nav.push(MaterialPageRoute<void>(
-      builder: (BuildContext _) => WebScreen(
-        url: t!.url,
-        title: item.title,
-        provider: t.provider,
-      ),
+      builder: (BuildContext _) => WebScreen(url: t!.url, title: item.title),
     ));
+  }
+}
+
+// ============================ TRAILER ================================
+/// URL de embed com 'origin' correto -> o YouTube nao devolve Erro 153.
+String ytEmbed(String key) {
+  String origin = 'https://www.youtube.com';
+  if (kIsWeb) {
+    try {
+      origin = Uri.base.origin;
+    } catch (_) {
+      origin = 'https://www.youtube.com';
+    }
+  }
+  return 'https://www.youtube.com/embed/$key'
+      '?autoplay=1&playsinline=1&rel=0&modestbranding=1&enablejsapi=1'
+      '&origin=$origin';
+}
+
+class TrailerPlayer extends StatefulWidget {
+  final String videoKey;
+  const TrailerPlayer({super.key, required this.videoKey});
+
+  @override
+  State<TrailerPlayer> createState() => _TrailerPlayerState();
+}
+
+class _TrailerPlayerState extends State<TrailerPlayer> {
+  WebViewController? _ctl;
+  bool _falhou = false;
+  bool _paisagem = false;
+  int _v = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _montar());
+  }
+
+  @override
+  void dispose() {
+    final WebViewController? c = _ctl;
+    if (c != null) {
+      try {
+        c.runJavaScript('try{var v=document.querySelector("video");if(v){v.pause();}}catch(e){}');
+      } catch (_) {}
+    }
+    super.dispose();
+  }
+
+  Future<void> _montar() async {
+    if (kIsWeb) {
+      if (mounted) setState(() {});
+      return;
+    }
+    try {
+      final WebViewController c = WebViewController();
+      await c.setJavaScriptMode(JavaScriptMode.unrestricted);
+      await c.setBackgroundColor(Colors.black);
+      await afinarWebView(c);
+      await c.setNavigationDelegate(NavigationDelegate(
+        onPageFinished: (String _) => _nudge(),
+        onWebResourceError: (WebResourceError e) {
+          if (mounted && e.isForMainFrame == true) {
+            setState(() => _falhou = true);
+          }
+        },
+      ));
+      await c.loadRequest(
+        Uri.parse(ytEmbed(widget.videoKey)),
+        headers: <String, String>{
+          'Referer': kYtReferer,
+          'Origin': 'https://www.youtube.com',
+        },
+      );
+      if (mounted) setState(() => _ctl = c);
+    } catch (_) {
+      if (mounted) setState(() => _falhou = true);
+    }
+  }
+
+  Future<void> _nudge() async {
+    final WebViewController? c = _ctl;
+    if (c == null) return;
+    const String js =
+        'try{var v=document.querySelector("video");if(v){v.muted=false;v.play();}}catch(e){}';
+    try {
+      await c.runJavaScript(js);
+    } catch (_) {}
+    await Future<void>.delayed(const Duration(milliseconds: 900));
+    try {
+      await c.runJavaScript(js);
+    } catch (_) {}
+  }
+
+  Future<void> _abrirNoYouTube() async {
+    final Uri uri = Uri.https('www.youtube.com', '/watch', {
+      'v': widget.videoKey,
+    });
+    try {
+      if (await canLaunchUrl(uri)) {
+        await launchUrl(uri, mode: LaunchMode.externalApplication);
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _alternarTela() async {
+    _paisagem = !_paisagem;
+    if (_paisagem) {
+      await Tela.paisagemTotal();
+    } else {
+      await Tela.voltarRetrato();
+    }
+    if (mounted) setState(() => _v++);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      children: <Widget>[
+        Positioned.fill(child: _video()),
+        Positioned(
+          top: 2,
+          right: 2,
+          child: Row(
+            children: <Widget>[
+              IconButton(
+                tooltip: 'Abrir no YouTube',
+                icon: const Icon(Icons.open_in_new, size: 18),
+                onPressed: _abrirNoYouTube,
+              ),
+              if (!kIsWeb)
+                IconButton(
+                  tooltip: _paisagem ? 'Voltar ao retrato' : 'Expandir',
+                  icon: Icon(
+                      _paisagem
+                          ? Icons.fullscreen_exit
+                          : Icons.fullscreen,
+                      size: 20),
+                  onPressed: _alternarTela,
+                ),
+              if (!kIsWeb)
+                IconButton(
+                  tooltip: 'Recarregar',
+                  icon: const Icon(Icons.refresh, size: 18),
+                  onPressed: () {
+                    setState(() {
+                      _falhou = false;
+                      _ctl = null;
+                    });
+                    _montar();
+                  },
+                ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _video() {
+    if (kIsWeb) {
+      return KeyedSubtree(
+        key: ValueKey<int>(_v),
+        child: TmcFrame(url: ytEmbed(widget.videoKey)),
+      );
+    }
+    final WebViewController? c = _ctl;
+    if (c == null) {
+      return Center(
+        child: _falhou
+            ? Column(
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  const Icon(Icons.videocam_off, color: kGold, size: 34),
+                  const SizedBox(height: 8),
+                  const Text('Trailer nao carregou.',
+                      style: TextStyle(fontSize: 12, color: Colors.white70)),
+                  const SizedBox(height: 6),
+                  TextButton(
+                    onPressed: () {
+                      setState(() => _falhou = false);
+                      _montar();
+                    },
+                    child: const Text('Tentar novamente'),
+                  ),
+                ],
+              )
+            : const CircularProgressIndicator(),
+      );
+    }
+    return WebViewWidget(controller: c);
   }
 }
 
 Future<void> showTrailer(
     BuildContext context, String videoKey, String title) async {
-  try {
-    await SystemChrome.setPreferredOrientations(
-      const <DeviceOrientation>[
-        DeviceOrientation.portraitUp,
-        DeviceOrientation.landscapeLeft,
-        DeviceOrientation.landscapeRight,
-      ],
-    );
-    await showGeneralDialog<void>(
-      context: context,
-      barrierDismissible: true,
-      barrierLabel: 'Trailer',
-      barrierColor: Colors.black.withValues(alpha: 0.86),
-      transitionDuration: const Duration(milliseconds: 220),
-      pageBuilder: (BuildContext ctx, Animation<double> a, Animation<double> b) {
-        return Center(
+  // libera a rotacao: o usuario pode girar o aparelho a vontade
+  await Tela.permitirGirar();
+  if (!context.mounted) return;
+
+  await showGeneralDialog<void>(
+    context: context,
+    barrierDismissible: true,
+    barrierLabel: 'Trailer',
+    barrierColor: Colors.black.withValues(alpha: 0.9),
+    transitionDuration: const Duration(milliseconds: 180),
+    pageBuilder: (BuildContext ctx, Animation<double> a, Animation<double> b) {
+      return Center(
+        child: SingleChildScrollView(
           child: Padding(
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.all(14),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: <Widget>[
@@ -1493,51 +1760,38 @@ Future<void> showTrailer(
                           style: const TextStyle(fontWeight: FontWeight.w700)),
                     ),
                     IconButton(
-                      tooltip: 'Paisagem',
-                      icon: const Icon(Icons.screen_rotation),
-                      onPressed: () => SystemChrome.setPreferredOrientations(
-                        const <DeviceOrientation>[
-                          DeviceOrientation.landscapeLeft,
-                          DeviceOrientation.landscapeRight,
-                        ],
-                      ),
-                    ),
-                    IconButton(
                       icon: const Icon(Icons.close),
                       onPressed: () => Navigator.of(ctx).pop(),
                     ),
                   ],
                 ),
-                const SizedBox(height: 6),
+                const SizedBox(height: 4),
                 AspectRatio(
                   aspectRatio: 16 / 9,
                   child: ClipRRect(
                     borderRadius: BorderRadius.circular(12),
-                    child: TrailerView(videoKey: videoKey),
+                    child: TrailerPlayer(videoKey: videoKey),
                   ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Use o icone de expandir para virar a tela.',
+                  style: TextStyle(fontSize: 10.5, color: Colors.white38),
                 ),
               ],
             ),
           ),
-        );
-      },
-      transitionBuilder: (BuildContext ctx, Animation<double> a,
-          Animation<double> b, Widget child) {
-        return FadeTransition(
-          opacity: a,
-          child: ScaleTransition(
-            scale: Tween<double>(begin: 0.94, end: 1.0).animate(a),
-            child: child,
-          ),
-        );
-      },
-    );
-  } finally {
-    await SystemChrome.setPreferredOrientations(
-      const <DeviceOrientation>[DeviceOrientation.portraitUp],
-    );
-    await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-  }
+        ),
+      );
+    },
+    transitionBuilder: (BuildContext ctx, Animation<double> a,
+        Animation<double> b, Widget child) {
+      return FadeTransition(opacity: a, child: child);
+    },
+  );
+
+  // volta o app ao normal (retrato + barras do sistema)
+  await Tela.restaurarApp();
 }
 
 // ======================= SCROLL PARA WEB =============================
@@ -1712,6 +1966,7 @@ class _LoginScreenState extends State<LoginScreen> {
   final TextEditingController _m = TextEditingController();
   final TextEditingController _p = TextEditingController();
   final TextEditingController _h = TextEditingController();
+
   bool _create = false;
   bool _busy = false;
   bool _see = false;
@@ -1743,7 +1998,6 @@ class _LoginScreenState extends State<LoginScreen> {
     final String u = _u.text.trim();
     final String p = _p.text;
     FocusScope.of(context).unfocus();
-
     setState(() {
       _busy = true;
       _err = '';
@@ -1806,56 +2060,63 @@ class _LoginScreenState extends State<LoginScreen> {
           builder: (BuildContext c, void Function(void Function()) set) {
             return AlertDialog(
               backgroundColor: kSurface,
-              title: const Text('Esqueci minha senha'),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  if (etapa == 'email') ...<Widget>[
-                    const Text(
-                      'Informe o e-mail cadastrado. Vamos usar a sua Dica de Senha.',
-                      style: TextStyle(fontSize: 12, color: Colors.white70),
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: mail,
-                      decoration: const InputDecoration(
-                          labelText: 'E-mail',
-                          border: OutlineInputBorder()),
-                    ),
-                  ],
-                  if (etapa == 'hint') ...<Widget>[
-                    Text('Usuario: $usuario',
-                        style: const TextStyle(fontWeight: FontWeight.w700)),
-                    const SizedBox(height: 8),
-                    Text('Dica: ${LocalDb.hintOf(usuario)}',
-                        style: const TextStyle(color: kGold, fontSize: 13)),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: resp,
-                      decoration: const InputDecoration(
-                          labelText: 'Resposta da dica',
-                          border: OutlineInputBorder()),
-                    ),
-                  ],
-                  if (etapa == 'nova') ...<Widget>[
-                    const Text('Resposta correta! Defina a nova senha.',
-                        style: TextStyle(color: kGreen, fontSize: 12)),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: nova,
-                      obscureText: true,
-                      decoration: const InputDecoration(
-                          labelText: 'Nova senha',
-                          border: OutlineInputBorder()),
-                    ),
-                  ],
-                  if (erro.isNotEmpty) ...<Widget>[
-                    const SizedBox(height: 10),
-                    Text(erro,
-                        style: const TextStyle(color: kRed, fontSize: 12)),
-                  ],
-                ],
+              title: const Text('Recuperar senha'),
+              content: SizedBox(
+                width: 340,
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      if (etapa == 'email') ...<Widget>[
+                        const Text(
+                          'Informe o e-mail cadastrado. A recuperacao usa a sua dica de senha.',
+                          style: TextStyle(fontSize: 12, color: Colors.white70),
+                        ),
+                        const SizedBox(height: 12),
+                        TextField(
+                          controller: mail,
+                          decoration: const InputDecoration(
+                              labelText: 'E-mail',
+                              border: OutlineInputBorder()),
+                        ),
+                      ],
+                      if (etapa == 'dica') ...<Widget>[
+                        Text('Usuario: $usuario',
+                            style:
+                                const TextStyle(fontWeight: FontWeight.w700)),
+                        const SizedBox(height: 8),
+                        Text('Dica: ${LocalDb.hintOf(usuario)}',
+                            style:
+                                const TextStyle(color: kGold, fontSize: 13)),
+                        const SizedBox(height: 12),
+                        TextField(
+                          controller: resp,
+                          decoration: const InputDecoration(
+                              labelText: 'Resposta da dica',
+                              border: OutlineInputBorder()),
+                        ),
+                      ],
+                      if (etapa == 'nova') ...<Widget>[
+                        const Text('Resposta correta! Defina a nova senha.',
+                            style: TextStyle(color: kGreen, fontSize: 12)),
+                        const SizedBox(height: 12),
+                        TextField(
+                          controller: nova,
+                          obscureText: true,
+                          decoration: const InputDecoration(
+                              labelText: 'Nova senha',
+                              border: OutlineInputBorder()),
+                        ),
+                      ],
+                      if (erro.isNotEmpty) ...<Widget>[
+                        const SizedBox(height: 10),
+                        Text(erro,
+                            style: const TextStyle(color: kRed, fontSize: 12)),
+                      ],
+                    ],
+                  ),
+                ),
               ),
               actions: <Widget>[
                 TextButton(
@@ -1865,20 +2126,20 @@ class _LoginScreenState extends State<LoginScreen> {
                 FilledButton(
                   onPressed: () {
                     if (etapa == 'email') {
-                      final String? achou =
-                          Auth.findUserByMail(mail.text);
+                      final String? achou = Auth.findUserByMail(mail.text);
                       if (achou == null) {
-                        set(() => erro = 'E-mail nao cadastrado neste aparelho.');
+                        set(() =>
+                            erro = 'E-mail nao cadastrado neste aparelho.');
                         return;
                       }
                       set(() {
                         usuario = achou;
                         erro = '';
-                        etapa = 'hint';
+                        etapa = 'dica';
                       });
                       return;
                     }
-                    if (etapa == 'hint') {
+                    if (etapa == 'dica') {
                       if (!Auth.checkHint(usuario, resp.text)) {
                         set(() => erro = 'Resposta incorreta. Tente novamente.');
                         return;
@@ -1933,200 +2194,197 @@ class _LoginScreenState extends State<LoginScreen> {
     return Scaffold(
       backgroundColor: kBg,
       body: SafeArea(
-        child: Center(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(20),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 440),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: <Widget>[
-                  const TmcLogo(size: 70),
-                  const SizedBox(height: 12),
-                  const Text('TMC',
-                      style: TextStyle(
-                          fontSize: 28,
-                          fontWeight: FontWeight.w900,
-                          letterSpacing: 6)),
-                  const SizedBox(height: 4),
-                  const Text('FILMES - SERIES - NOVELAS - KIDS - TV',
-                      style: TextStyle(
-                          fontSize: 11,
-                          color: Colors.white38,
-                          letterSpacing: 1)),
-                  const SizedBox(height: 16),
-                  SizedBox(
-                    width: double.infinity,
-                    child: FilledButton.icon(
-                      onPressed: _busy ? null : _continueOffline,
-                      icon: const Icon(Icons.phone_android),
-                      label: const Text(
-                        'ENTRAR SEM CONTA',
-                        style: TextStyle(fontWeight: FontWeight.w900),
-                      ),
-                      style: FilledButton.styleFrom(
-                        backgroundColor: kGold,
-                        foregroundColor: Colors.black,
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                      ),
-                    ),
+        child: LayoutBuilder(
+          builder: (BuildContext context, BoxConstraints c) {
+            return SingleChildScrollView(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 18, vertical: 22),
+              child: ConstrainedBox(
+                constraints: BoxConstraints(minHeight: c.maxHeight - 44),
+                child: Center(
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 460),
+                    child: _form(),
                   ),
-                  const SizedBox(height: 5),
-                  const Text(
-                    'Sem cadastro. Favoritos e historico salvos neste navegador.',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(color: Colors.white54, fontSize: 11),
-                  ),
-                  const SizedBox(height: 18),
-                  Card(
-                    color: kSurface,
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(16)),
-                    child: Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Column(
-                        children: <Widget>[
-                          Row(
-                            children: <Widget>[
-                              Expanded(child: _mode('ENTRAR', !_create)),
-                              const SizedBox(width: 8),
-                              Expanded(child: _mode('CRIAR CONTA', _create)),
-                            ],
-                          ),
-                          const SizedBox(height: 14),
-                          TextField(
-                            controller: _u,
-                            autofocus: true,
-                            textInputAction: TextInputAction.next,
-                            decoration: const InputDecoration(
-                              labelText: 'Usuario',
-                              prefixIcon: Icon(Icons.person_outline),
-                              border: OutlineInputBorder(),
-                            ),
-                          ),
-                          if (_create) ...<Widget>[
-                            const SizedBox(height: 10),
-                            TextField(
-                              controller: _m,
-                              keyboardType: TextInputType.emailAddress,
-                              decoration: const InputDecoration(
-                                labelText: 'E-mail',
-                                prefixIcon: Icon(Icons.alternate_email),
-                                border: OutlineInputBorder(),
-                              ),
-                            ),
-                          ],
-                          const SizedBox(height: 10),
-                          TextField(
-                            controller: _p,
-                            obscureText: !_see,
-                            textInputAction: _create
-                                ? TextInputAction.next
-                                : TextInputAction.done,
-                            onSubmitted: (String _) {
-                              if (!_create) _submit();
-                            },
-                            decoration: InputDecoration(
-                              labelText: 'Senha',
-                              prefixIcon: const Icon(Icons.lock_outline),
-                              border: const OutlineInputBorder(),
-                              suffixIcon: IconButton(
-                                icon: Icon(_see
-                                    ? Icons.visibility_off
-                                    : Icons.visibility),
-                                onPressed: () => setState(() => _see = !_see),
-                              ),
-                            ),
-                          ),
-                          if (_create) ...<Widget>[
-                            const SizedBox(height: 10),
-                            TextField(
-                              controller: _h,
-                              decoration: const InputDecoration(
-                                labelText: 'Dica de senha',
-                                helperText:
-                                    'Ex: cidade onde nasci / nome do meu cao',
-                                prefixIcon: Icon(Icons.lightbulb_outline),
-                                border: OutlineInputBorder(),
-                              ),
-                            ),
-                          ],
-                          const SizedBox(height: 12),
-                          if (_err.isNotEmpty) ...<Widget>[
-                            const SizedBox(height: 10),
-                            Text(_err,
-                                textAlign: TextAlign.center,
-                                style: const TextStyle(
-                                    color: kRed, fontSize: 12.5)),
-                          ],
-                          const SizedBox(height: 14),
-                          SizedBox(
-                            width: double.infinity,
-                            child: FilledButton.icon(
-                              onPressed: _busy ? null : _submit,
-                              style: FilledButton.styleFrom(
-                                  padding:
-                                      const EdgeInsets.symmetric(vertical: 15)),
-                              icon: _busy
-                                  ? const SizedBox(
-                                      width: 16,
-                                      height: 16,
-                                      child: CircularProgressIndicator(
-                                          strokeWidth: 2))
-                                  : const Icon(Icons.login),
-                              label: Text(
-                                _create ? 'CRIAR E ENTRAR' : 'ENTRAR',
-                                style: const TextStyle(
-                                    fontWeight: FontWeight.w900,
-                                    letterSpacing: 0.8),
-                              ),
-                            ),
-                          ),
-                          TextButton(
-                            onPressed: _esqueci,
-                            child: const Text('Esqueci minha senha',
-                                style: TextStyle(color: kGold, fontSize: 12)),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                  if (_contas.isNotEmpty) ...<Widget>[
-                    const SizedBox(height: 16),
-                    const Text('Contas neste aparelho',
-                        style: TextStyle(fontSize: 11.5, color: Colors.white38)),
-                    const SizedBox(height: 8),
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      alignment: WrapAlignment.center,
-                      children: _contas
-                          .map((String c) => ActionChip(
-                                label: Text(c),
-                                onPressed: () => setState(() {
-                                  _u.text = c;
-                                  _create = false;
-                                }),
-                              ))
-                          .toList(),
-                    ),
-                  ],
-                  const SizedBox(height: 18),
-                  Text('Backup automatico em: ${LocalDb.location}',
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                          fontSize: 10.5, color: Colors.white38)),
-                  TextButton.icon(
-                    onPressed: _reimport,
-                    icon: const Icon(Icons.restore, size: 16),
-                    label: const Text('REIMPORTAR BACKUP DO ARQUIVO'),
-                  ),
-                ],
+                ),
               ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _form() {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        const TmcLogo(size: 68),
+        const SizedBox(height: 12),
+        const Text('TMC',
+            style: TextStyle(
+                fontSize: 26, fontWeight: FontWeight.w900, letterSpacing: 6)),
+        const SizedBox(height: 4),
+        const Text('FILMES - SERIES - NOVELAS - KIDS - TV',
+            style: TextStyle(
+                fontSize: 11, color: Colors.white38, letterSpacing: 1)),
+        const SizedBox(height: 16),
+        SizedBox(
+          width: double.infinity,
+          child: FilledButton.icon(
+            onPressed: _busy ? null : _continueOffline,
+            icon: const Icon(Icons.phone_android),
+            label: const Text('ENTRAR SEM CONTA',
+                style: TextStyle(fontWeight: FontWeight.w900)),
+            style: FilledButton.styleFrom(
+              backgroundColor: kGold,
+              foregroundColor: Colors.black,
+              padding: const EdgeInsets.symmetric(vertical: 16),
             ),
           ),
         ),
-      ),
+        const SizedBox(height: 5),
+        const Text(
+          'Sem cadastro. Favoritos e historico salvos neste navegador.',
+          textAlign: TextAlign.center,
+          style: TextStyle(color: Colors.white54, fontSize: 11),
+        ),
+        const SizedBox(height: 18),
+        Card(
+          color: kSurface,
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                Row(
+                  children: <Widget>[
+                    Expanded(child: _mode('ENTRAR', !_create)),
+                    const SizedBox(width: 8),
+                    Expanded(child: _mode('CRIAR CONTA', _create)),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                TextField(
+                  controller: _u,
+                  autofocus: true,
+                  textInputAction: TextInputAction.next,
+                  decoration: const InputDecoration(
+                    labelText: 'Usuario',
+                    prefixIcon: Icon(Icons.person_outline),
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                if (_create) ...<Widget>[
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: _m,
+                    keyboardType: TextInputType.emailAddress,
+                    decoration: const InputDecoration(
+                      labelText: 'E-mail',
+                      prefixIcon: Icon(Icons.alternate_email),
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 10),
+                TextField(
+                  controller: _p,
+                  obscureText: !_see,
+                  textInputAction:
+                      _create ? TextInputAction.next : TextInputAction.done,
+                  onSubmitted: (String _) {
+                    if (!_create) _submit();
+                  },
+                  decoration: InputDecoration(
+                    labelText: 'Senha',
+                    prefixIcon: const Icon(Icons.lock_outline),
+                    border: const OutlineInputBorder(),
+                    suffixIcon: IconButton(
+                      icon: Icon(_see ? Icons.visibility_off : Icons.visibility),
+                      onPressed: () => setState(() => _see = !_see),
+                    ),
+                  ),
+                ),
+                if (_create) ...<Widget>[
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: _h,
+                    decoration: const InputDecoration(
+                      labelText: 'Dica de senha',
+                      helperText: 'Ex: cidade onde nasci',
+                      prefixIcon: Icon(Icons.lightbulb_outline),
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ],
+                if (_err.isNotEmpty) ...<Widget>[
+                  const SizedBox(height: 10),
+                  Text(_err,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: kRed, fontSize: 12.5)),
+                ],
+                const SizedBox(height: 14),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    onPressed: _busy ? null : _submit,
+                    style: FilledButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 15)),
+                    icon: _busy
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2))
+                        : const Icon(Icons.login),
+                    label: Text(
+                      _create ? 'CRIAR E ENTRAR' : 'ENTRAR',
+                      style: const TextStyle(
+                          fontWeight: FontWeight.w900, letterSpacing: 0.8),
+                    ),
+                  ),
+                ),
+                TextButton(
+                  onPressed: _esqueci,
+                  child: const Text('Esqueci minha senha',
+                      style: TextStyle(color: kGold, fontSize: 12)),
+                ),
+              ],
+            ),
+          ),
+        ),
+        if (_contas.isNotEmpty) ...<Widget>[
+          const SizedBox(height: 16),
+          const Text('Contas neste aparelho',
+              style: TextStyle(fontSize: 11.5, color: Colors.white38)),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            alignment: WrapAlignment.center,
+            children: _contas
+                .map((String c) => ActionChip(
+                      label: Text(c),
+                      onPressed: () => setState(() {
+                        _u.text = c;
+                        _create = false;
+                      }),
+                    ))
+                .toList(),
+          ),
+        ],
+        const SizedBox(height: 16),
+        Text('Backup automatico em: ${LocalDb.location}',
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: 10.5, color: Colors.white38)),
+        TextButton.icon(
+          onPressed: _reimport,
+          icon: const Icon(Icons.restore, size: 16),
+          label: const Text('REIMPORTAR BACKUP DO ARQUIVO'),
+        ),
+      ],
     );
   }
 
@@ -2167,14 +2425,11 @@ class TmcLogo extends StatelessWidget {
         borderRadius: BorderRadius.circular(size * 0.26),
       ),
       child: Center(
-        child: Text(
-          'TMC',
-          style: TextStyle(
-            fontWeight: FontWeight.w900,
-            fontSize: size * 0.3,
-            letterSpacing: -0.5,
-          ),
-        ),
+        child: Text('TMC',
+            style: TextStyle(
+                fontWeight: FontWeight.w900,
+                fontSize: size * 0.3,
+                letterSpacing: -0.5)),
       ),
     );
   }
@@ -2275,6 +2530,23 @@ const List<GenreChip> kChipsKids = <GenreChip>[
       extra: <String, String>{'with_origin_country': 'JP'}),
 ];
 
+const List<Channel> kCanaisFallback = <Channel>[
+  Channel('ae', 'A&E', 'VARIEDADES'),
+  Channel('adultswim', 'Adult Swim', 'SERIES'),
+  Channel('band', 'Band', 'ABERTOS'),
+  Channel('bandnews', 'Band News', 'NOTICIAS'),
+  Channel('cartoonnetwork', 'Cartoon Network', 'KIDS'),
+  Channel('cnnbrasil', 'CNN Brasil', 'NOTICIAS'),
+  Channel('discoverykids', 'Discovery Kids', 'KIDS'),
+  Channel('espn', 'ESPN', 'ESPORTES'),
+  Channel('globonews', 'Globo News', 'NOTICIAS'),
+  Channel('hbo', 'HBO', 'FILMES'),
+  Channel('recordnews', 'Record News', 'NOTICIAS'),
+  Channel('sportv', 'SporTV', 'ESPORTES'),
+  Channel('telecine', 'Telecine', 'FILMES'),
+  Channel('warner', 'Warner', 'FILMES'),
+];
+
 // ============================== SHELL ================================
 class RootShell extends StatefulWidget {
   final Future<void> Function() onLogout;
@@ -2371,22 +2643,23 @@ class _RootShellState extends State<RootShell>
       builder: (BuildContext ctx) => AlertDialog(
         backgroundColor: kSurface,
         title: const Text('Backup do perfil'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Text('Conta: ${Store.user}',
-                style: const TextStyle(fontWeight: FontWeight.w700)),
-            const SizedBox(height: 8),
-            const Text(
-              'Favoritos e historico sao salvos automaticamente. '
-              'Reinstale o app e use REIMPORTAR BACKUP na tela de login.',
-              style: TextStyle(fontSize: 12, color: Colors.white70),
-            ),
-            const SizedBox(height: 10),
-            Text('Local: ${LocalDb.location}',
-                style: const TextStyle(fontSize: 11, color: kGold)),
-          ],
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Text('Conta: ${Store.user}',
+                  style: const TextStyle(fontWeight: FontWeight.w700)),
+              const SizedBox(height: 8),
+              const Text(
+                'Favoritos e historico sao salvos automaticamente. Reinstale o app e use REIMPORTAR BACKUP na tela de login.',
+                style: TextStyle(fontSize: 12, color: Colors.white70),
+              ),
+              const SizedBox(height: 10),
+              Text('Local: ${LocalDb.location}',
+                  style: const TextStyle(fontSize: 11, color: kGold)),
+            ],
+          ),
         ),
         actions: <Widget>[
           TextButton(
@@ -2760,7 +3033,7 @@ class _HeroBannerState extends State<HeroBanner> {
   Widget build(BuildContext context) {
     final MediaItem item = widget.item;
     final double h =
-        (MediaQuery.of(context).size.height * 0.6).clamp(320.0, 620.0);
+        (MediaQuery.of(context).size.height * 0.6).clamp(300.0, 620.0);
 
     return SizedBox(
       height: h,
@@ -2824,7 +3097,7 @@ class _HeroBannerState extends State<HeroBanner> {
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
-                      fontSize: 30, height: 1.05, fontWeight: FontWeight.w900),
+                      fontSize: 28, height: 1.05, fontWeight: FontWeight.w900),
                 ),
                 const SizedBox(height: 8),
                 Row(
@@ -2851,8 +3124,11 @@ class _HeroBannerState extends State<HeroBanner> {
                         color: Colors.white70, fontSize: 12.5, height: 1.4),
                   ),
                 ],
-                const SizedBox(height: 16),
-                Row(
+                const SizedBox(height: 14),
+                Wrap(
+                  spacing: 10,
+                  runSpacing: 8,
+                  crossAxisAlignment: WrapCrossAlignment.center,
                   children: <Widget>[
                     FilledButton.icon(
                       autofocus: true,
@@ -2868,7 +3144,6 @@ class _HeroBannerState extends State<HeroBanner> {
                           style: TextStyle(
                               fontWeight: FontWeight.w900, letterSpacing: 0.6)),
                     ),
-                    const SizedBox(width: 10),
                     OutlinedButton.icon(
                       onPressed: () async {
                         await Store.toggleFav(item);
@@ -2889,7 +3164,6 @@ class _HeroBannerState extends State<HeroBanner> {
                           style: const TextStyle(
                               fontWeight: FontWeight.w700, fontSize: 12)),
                     ),
-                    const SizedBox(width: 8),
                     IconButton(
                       tooltip: 'Detalhes',
                       onPressed: () {
@@ -2922,7 +3196,7 @@ class MediaRow extends StatelessWidget {
     super.key,
     required this.title,
     required this.items,
-    this.height = 218,
+    this.height = 214,
     this.removable = false,
     this.onRemove,
     this.onClear,
@@ -2981,7 +3255,7 @@ class MediaRow extends StatelessWidget {
             itemCount: items.length,
             itemBuilder: (BuildContext context, int i) => PosterCard(
               item: items[i],
-              width: 134,
+              width: 132,
               onRemove: removable && onRemove != null
                   ? () {
                       final void Function(MediaItem)? f = onRemove;
@@ -3046,7 +3320,7 @@ class ContinueRow extends StatelessWidget {
           ),
         ),
         SizedBox(
-          height: 190,
+          height: 186,
           child: ListView.builder(
             scrollDirection: Axis.horizontal,
             padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -3085,7 +3359,7 @@ class _ContinueCardState extends State<_ContinueCard> {
       scale: _focused ? 1.05 : 1.0,
       duration: const Duration(milliseconds: 150),
       child: Container(
-        width: 250,
+        width: 248,
         margin: const EdgeInsets.symmetric(horizontal: 6),
         child: Material(
           color: kCard,
@@ -3164,6 +3438,7 @@ class _ContinueCardState extends State<_ContinueCard> {
                   padding: const EdgeInsets.all(9),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
                     children: <Widget>[
                       Text(w.media.title,
                           maxLines: 1,
@@ -3171,11 +3446,11 @@ class _ContinueCardState extends State<_ContinueCard> {
                           style: const TextStyle(
                               fontSize: 12.5, fontWeight: FontWeight.w700)),
                       const SizedBox(height: 2),
-                      Text(
-                        '${w.label} - ${fmtSeg(w.position)}',
-                        style: const TextStyle(
-                            fontSize: 10.5, color: Colors.white54),
-                      ),
+                      Text('${w.label} - ${fmtSeg(w.position)}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              fontSize: 10.5, color: Colors.white54)),
                     ],
                   ),
                 ),
@@ -3302,6 +3577,7 @@ class _PosterCardState extends State<PosterCard> {
                     ? widget.item.typeLabel
                     : '${widget.item.year} - ${widget.item.typeLabel}',
                 maxLines: 1,
+                overflow: TextOverflow.ellipsis,
                 style: const TextStyle(fontSize: 10, color: Colors.white38),
               ),
             ],
@@ -3541,7 +3817,7 @@ class _InfiniteGridState extends State<InfiniteGrid> {
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.fromLTRB(12, 10, 12, 90),
         gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-          maxCrossAxisExtent: 162,
+          maxCrossAxisExtent: 160,
           childAspectRatio: 0.54,
           crossAxisSpacing: 12,
           mainAxisSpacing: 14,
@@ -3586,7 +3862,7 @@ class OnlineTvTab extends StatefulWidget {
 }
 
 class _OnlineTvTabState extends State<OnlineTvTab> {
-  bool _eventos = false;
+  bool _esportes = false;
   bool _carregando = true;
   List<Channel> _canais = <Channel>[];
   List<Channel> _meus = <Channel>[];
@@ -3619,7 +3895,7 @@ class _OnlineTvTabState extends State<OnlineTvTab> {
     if (!mounted) return;
     setState(() {
       _meus = meus;
-      _canais = api;
+      _canais = api.isEmpty ? kCanaisFallback : api;
       _jogos = ev;
       _carregando = false;
     });
@@ -3633,12 +3909,58 @@ class _OnlineTvTabState extends State<OnlineTvTab> {
   }
 
   void _abrir(String titulo, String url) {
+    if (kIsWeb) {
+      final String alt = url.contains('superflixapi.fun')
+          ? url.replaceAll('superflixapi.fun', 'pobreflixhd.sbs')
+          : '';
+      Navigator.of(context).push(MaterialPageRoute<void>(
+        builder: (_) => FrameScreen(
+          url: alt.isEmpty ? url : alt,
+          title: titulo,
+          urlAlt: alt.isEmpty ? '' : url,
+        ),
+      ));
+      return;
+    }
     Navigator.of(context).push(MaterialPageRoute<void>(
-      builder: (_) => WebScreen(url: url, title: titulo, provider: 'TV ONLINE'),
+      builder: (_) => WebScreen(url: url, title: titulo),
     ));
   }
 
-  void _playCanal(Channel c) => _abrir(c.name, SuperFlix.canalUrl(c.id));
+  Future<void> _playCanal(Channel c) async {
+    final String pagina = SuperFlix.canal(c.id);
+    if (kIsWeb) {
+      _abrir(c.name, pagina);
+      return;
+    }
+    final ScaffoldMessengerState ms = ScaffoldMessenger.of(context);
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      useRootNavigator: true,
+      builder: (BuildContext _) => const LoadingDialog(),
+    );
+    final PlayTarget? t = await Resolver.pagina(pagina, 'SuperFlixAPI');
+    if (!mounted) return;
+    if (Navigator.of(context, rootNavigator: true).canPop()) {
+      Navigator.of(context, rootNavigator: true).pop();
+    }
+    if (t != null && t.direct) {
+      Navigator.of(context).push(MaterialPageRoute<void>(
+        builder: (_) => PlayerScreen(
+          url: t.url,
+          title: c.name,
+          provider: 'TV ONLINE',
+          referer: t.referer,
+          live: true,
+          embed: pagina,
+        ),
+      ));
+    } else {
+      ms.showSnackBar(const SnackBar(content: Text('Abrindo o canal...')));
+      _abrir(c.name, t == null ? pagina : t.url);
+    }
+  }
 
   Future<void> _add() async {
     final TextEditingController n = TextEditingController();
@@ -3648,22 +3970,24 @@ class _OnlineTvTabState extends State<OnlineTvTab> {
       builder: (BuildContext ctx) => AlertDialog(
         backgroundColor: kSurface,
         title: const Text('Novo canal'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            TextField(
-              controller: n,
-              decoration: const InputDecoration(
-                  labelText: 'Nome do canal', border: OutlineInputBorder()),
-            ),
-            const SizedBox(height: 10),
-            TextField(
-              controller: u,
-              decoration: const InputDecoration(
-                  labelText: 'Link .m3u8 ou pagina embed',
-                  border: OutlineInputBorder()),
-            ),
-          ],
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              TextField(
+                controller: n,
+                decoration: const InputDecoration(
+                    labelText: 'Nome do canal', border: OutlineInputBorder()),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: u,
+                decoration: const InputDecoration(
+                    labelText: 'Link .m3u8 ou pagina embed',
+                    border: OutlineInputBorder()),
+              ),
+            ],
+          ),
         ),
         actions: <Widget>[
           TextButton(
@@ -3705,28 +4029,22 @@ class _OnlineTvTabState extends State<OnlineTvTab> {
     return ListView(
       padding: const EdgeInsets.fromLTRB(14, 12, 14, 90),
       children: <Widget>[
-        Row(
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          crossAxisAlignment: WrapCrossAlignment.center,
           children: <Widget>[
-            Expanded(
-              child: Row(
-                children: <Widget>[
-                  ChoiceChip(
-                    label: const Text('CANAIS',
-                        style: TextStyle(fontSize: 11.5)),
-                    selected: !_eventos,
-                    selectedColor: kGold,
-                    onSelected: (bool _) => setState(() => _eventos = false),
-                  ),
-                  const SizedBox(width: 8),
-                  ChoiceChip(
-                    label: const Text('ESPORTES',
-                        style: TextStyle(fontSize: 11.5)),
-                    selected: _eventos,
-                    selectedColor: kGold,
-                    onSelected: (bool _) => setState(() => _eventos = true),
-                  ),
-                ],
-              ),
+            ChoiceChip(
+              label: const Text('CANAIS', style: TextStyle(fontSize: 11.5)),
+              selected: !_esportes,
+              selectedColor: kGold,
+              onSelected: (bool _) => setState(() => _esportes = false),
+            ),
+            ChoiceChip(
+              label: const Text('ESPORTES', style: TextStyle(fontSize: 11.5)),
+              selected: _esportes,
+              selectedColor: kGold,
+              onSelected: (bool _) => setState(() => _esportes = true),
             ),
             IconButton(
               tooltip: 'Atualizar',
@@ -3741,7 +4059,7 @@ class _OnlineTvTabState extends State<OnlineTvTab> {
           ],
         ),
         const SizedBox(height: 10),
-        if (_eventos) ..._listaEventos() else ..._listaCanais(todos, grupos),
+        if (_esportes) ..._listaEventos() else ..._listaCanais(todos, grupos),
       ],
     );
   }
@@ -3752,7 +4070,7 @@ class _OnlineTvTabState extends State<OnlineTvTab> {
         const Padding(
           padding: EdgeInsets.only(top: 60),
           child: Center(
-            child: Text('Nenhum evento esportivo na agenda agora.',
+            child: Text('Nenhum evento na agenda agora.',
                 style: TextStyle(color: Colors.white54)),
           ),
         ),
@@ -3784,20 +4102,19 @@ class _OnlineTvTabState extends State<OnlineTvTab> {
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
                       children: <Widget>[
                         Text(e.title,
                             maxLines: 2,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
                                 fontWeight: FontWeight.w700, fontSize: 13.5)),
-                        Text(
-                            <String>[e.competition, e.sport, e.status]
-                                .where((String s) => s.isNotEmpty)
-                                .join(' - '),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                                fontSize: 10.5, color: Colors.white38)),
+                        if (e.sub.isNotEmpty)
+                          Text(e.sub,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                  fontSize: 10.5, color: Colors.white38)),
                       ],
                     ),
                   ),
@@ -3832,8 +4149,7 @@ class _OnlineTvTabState extends State<OnlineTvTab> {
             clipBehavior: Clip.antiAlias,
             child: InkWell(
               onTap: () => _playCanal(c),
-              onLongPress:
-                  c.group == 'MEUS CANAIS' ? () => _remove(c) : null,
+              onLongPress: c.group == 'MEUS CANAIS' ? () => _remove(c) : null,
               child: Padding(
                 padding: const EdgeInsets.all(10),
                 child: Row(
@@ -3966,7 +4282,7 @@ class _SearchScreenState extends State<SearchScreen> {
     return GridView.builder(
       padding: const EdgeInsets.fromLTRB(12, 12, 12, 60),
       gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-        maxCrossAxisExtent: 162,
+        maxCrossAxisExtent: 160,
         childAspectRatio: 0.54,
         crossAxisSpacing: 12,
         mainAxisSpacing: 14,
@@ -4165,7 +4481,7 @@ class _DetailsScreenState extends State<DetailsScreen> {
         slivers: <Widget>[
           SliverAppBar(
             pinned: true,
-            expandedHeight: 320,
+            expandedHeight: 300,
             backgroundColor: kBg,
             flexibleSpace: FlexibleSpaceBar(
               title: Text(item.title,
@@ -4267,38 +4583,38 @@ class _DetailsScreenState extends State<DetailsScreen> {
           ],
         ),
         const SizedBox(height: 14),
-        Row(
+        Wrap(
+          spacing: 10,
+          runSpacing: 8,
+          crossAxisAlignment: WrapCrossAlignment.center,
           children: <Widget>[
-            Expanded(
-              child: FilledButton.icon(
-                autofocus: true,
-                onPressed: () => openPlayer(context, item,
-                    season: _season, episode: 1, forced: _server),
-                style: FilledButton.styleFrom(
-                  backgroundColor: Colors.white,
-                  foregroundColor: Colors.black,
-                  padding: const EdgeInsets.symmetric(vertical: 15),
-                ),
-                icon: const Icon(Icons.play_arrow),
-                label: const Text('ASSISTIR',
-                    style: TextStyle(
-                        fontWeight: FontWeight.w900, letterSpacing: 0.6)),
+            FilledButton.icon(
+              autofocus: true,
+              onPressed: () => openPlayer(context, item,
+                  season: _season, episode: 1, forced: _server),
+              style: FilledButton.styleFrom(
+                backgroundColor: Colors.white,
+                foregroundColor: Colors.black,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
               ),
+              icon: const Icon(Icons.play_arrow),
+              label: const Text('ASSISTIR',
+                  style: TextStyle(
+                      fontWeight: FontWeight.w900, letterSpacing: 0.6)),
             ),
-            const SizedBox(width: 10),
             OutlinedButton.icon(
               onPressed: _verTrailer,
               style: OutlinedButton.styleFrom(
                 foregroundColor: Colors.white,
                 side: const BorderSide(color: Colors.white38),
                 padding:
-                    const EdgeInsets.symmetric(horizontal: 14, vertical: 15),
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
               ),
               icon: const Icon(Icons.smart_display_outlined, size: 18),
               label: const Text('VER TRAILER',
                   style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12)),
             ),
-            const SizedBox(width: 8),
             IconButton(
               tooltip: 'Favoritar',
               onPressed: () async {
@@ -4491,8 +4807,8 @@ class _DetailsScreenState extends State<DetailsScreen> {
                 ClipRRect(
                   borderRadius: BorderRadius.circular(8),
                   child: SizedBox(
-                    width: 128,
-                    height: 72,
+                    width: 118,
+                    height: 68,
                     child: e.stillUrl.isEmpty
                         ? Container(
                             color: kSurface,
@@ -4511,6 +4827,7 @@ class _DetailsScreenState extends State<DetailsScreen> {
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
                     children: <Widget>[
                       Text(
                         '${e.number}. ${e.name}',
@@ -4572,7 +4889,117 @@ class _DetailsScreenState extends State<DetailsScreen> {
   }
 }
 
-// ======================= PLAYER NATIVO IMERSIVO ======================
+// ================== TELA DE EMBUTIR (WEB - IFRAME) ===================
+class FrameScreen extends StatefulWidget {
+  final String url;
+  final String title;
+  final String urlAlt;
+
+  const FrameScreen({
+    super.key,
+    required this.url,
+    required this.title,
+    this.urlAlt = '',
+  });
+
+  @override
+  State<FrameScreen> createState() => _FrameScreenState();
+}
+
+class _FrameScreenState extends State<FrameScreen> {
+  int _v = 0;
+  bool _alt = false;
+
+  String get _atual =>
+      (_alt && widget.urlAlt.isNotEmpty) ? widget.urlAlt : widget.url;
+
+  @override
+  void initState() {
+    super.initState();
+    try {
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    } catch (_) {}
+  }
+
+  @override
+  void dispose() {
+    CacheKeeper.wipe();
+    try {
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    } catch (_) {}
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: Stack(
+        children: <Widget>[
+          Positioned.fill(
+            child: KeyedSubtree(
+              key: ValueKey<int>(_v + (_alt ? 1000 : 0)),
+              child: TmcFrame(url: _atual),
+            ),
+          ),
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: SafeArea(
+              child: Container(
+                color: Colors.black.withValues(alpha: 0.62),
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                child: Row(
+                  children: <Widget>[
+                    IconButton(
+                      icon: const Icon(Icons.arrow_back),
+                      onPressed: () => Navigator.of(context).pop(),
+                    ),
+                    Expanded(
+                      child: Text(
+                        widget.title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                    if (widget.urlAlt.isNotEmpty)
+                      TextButton(
+                        onPressed: () => setState(() {
+                          _alt = !_alt;
+                          _v++;
+                        }),
+                        child: Text(
+                          _alt ? 'SERVIDOR 2' : 'SERVIDOR 1',
+                          style: const TextStyle(
+                              color: kGold,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w800),
+                        ),
+                      ),
+                    IconButton(
+                      tooltip: 'Recarregar',
+                      icon: const Icon(Icons.refresh),
+                      onPressed: () => setState(() => _v++),
+                    ),
+                    IconButton(
+                      tooltip: 'Abrir em nova aba (sem iframe)',
+                      icon: const Icon(Icons.open_in_new),
+                      onPressed: () => abrirExterno(_atual),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ======================= PLAYER NATIVO (ANDROID) =====================
 class PlayerScreen extends StatefulWidget {
   final String url;
   final String title;
@@ -4632,16 +5059,17 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   Map<String, String> get _headers {
     final Map<String, String> h = <String, String>{'User-Agent': kUserAgent};
-    if (widget.referer.isNotEmpty) h['Referer'] = widget.referer;
+    if (widget.referer.isNotEmpty) {
+      h['Referer'] = widget.referer;
+      h['Origin'] = widget.referer;
+    }
     return h;
   }
 
   @override
   void initState() {
     super.initState();
-    try {
-      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-    } catch (_) {}
+    Tela.paisagemTotal();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _open(widget.url, first: true);
     });
@@ -4789,7 +5217,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
     setState(() => _cues = cues);
   }
 
-  /// Qualidade automatica: cai para a faixa mais leve se a rede engasgar.
   void _check() {
     final VideoPlayerController? c = _c;
     if (c == null || !c.value.isInitialized) return;
@@ -4819,9 +5246,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
       builder: (BuildContext ctx) => AlertDialog(
         backgroundColor: kSurface,
         title: const Text('Continuar de onde parou?'),
-        content: Text(
-          'Voce parou em ${fmtSeg(seconds)}. Deseja retomar deste ponto?',
-          style: const TextStyle(color: Colors.white70),
+        content: SingleChildScrollView(
+          child: Text(
+            'Voce parou em ${fmtSeg(seconds)}. Deseja retomar deste ponto?',
+            style: const TextStyle(color: Colors.white70),
+          ),
         ),
         actions: <Widget>[
           TextButton(
@@ -4910,14 +5339,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _watch?.cancel();
     _detach();
     CacheKeeper.wipe();
-    try {
-      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-      SystemChrome.setPreferredOrientations(const <DeviceOrientation>[
-        DeviceOrientation.portraitUp,
-        DeviceOrientation.landscapeLeft,
-        DeviceOrientation.landscapeRight,
-      ]);
-    } catch (_) {}
+    Tela.restaurarApp();
     super.dispose();
   }
 
@@ -4931,6 +5353,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   @override
   Widget build(BuildContext context) {
     final VideoPlayerController? c = _c;
+    final bool estreito = MediaQuery.of(context).size.width < 760;
     return Scaffold(
       backgroundColor: Colors.black,
       body: Focus(
@@ -4968,7 +5391,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
               AnimatedOpacity(
                 opacity: _ui ? 1 : 0,
                 duration: const Duration(milliseconds: 180),
-                child: IgnorePointer(ignoring: !_ui, child: _overlay(c)),
+                child:
+                    IgnorePointer(ignoring: !_ui, child: _overlay(c, estreito)),
               ),
             ],
           ),
@@ -4992,40 +5416,44 @@ class _PlayerScreenState extends State<PlayerScreen> {
   Widget _errorBox() {
     return Padding(
       padding: const EdgeInsets.all(24),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: <Widget>[
-          const Icon(Icons.error_outline, color: kGold, size: 48),
-          const SizedBox(height: 12),
-          const Text('Falha ao abrir o stream direto.',
-              textAlign: TextAlign.center),
-          const SizedBox(height: 6),
-          Text(_err,
-              maxLines: 3,
-              textAlign: TextAlign.center,
-              style: const TextStyle(fontSize: 11, color: Colors.white54)),
-          const SizedBox(height: 16),
-          Wrap(
-            spacing: 10,
-            children: <Widget>[
-              FilledButton.icon(
-                onPressed: () => _open(widget.url, first: true),
-                icon: const Icon(Icons.refresh),
-                label: const Text('Tentar novamente'),
-              ),
-              OutlinedButton.icon(
-                onPressed: _openWeb,
-                icon: const Icon(Icons.language),
-                label: const Text('Abrir na WebView'),
-              ),
-            ],
-          ),
-        ],
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            const Icon(Icons.error_outline, color: kGold, size: 48),
+            const SizedBox(height: 12),
+            const Text('Falha ao abrir o stream direto.',
+                textAlign: TextAlign.center),
+            const SizedBox(height: 6),
+            Text(_err,
+                maxLines: 3,
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 11, color: Colors.white54)),
+            const SizedBox(height: 16),
+            Wrap(
+              spacing: 10,
+              runSpacing: 8,
+              alignment: WrapAlignment.center,
+              children: <Widget>[
+                FilledButton.icon(
+                  onPressed: () => _open(widget.url, first: true),
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('Tentar novamente'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: _openWeb,
+                  icon: const Icon(Icons.language),
+                  label: const Text('Abrir no site'),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
 
-  Widget _overlay(VideoPlayerController? c) {
+  Widget _overlay(VideoPlayerController? c, bool estreito) {
     return DecoratedBox(
       decoration: const BoxDecoration(
         gradient: LinearGradient(
@@ -5042,7 +5470,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       ),
       child: Column(
         children: <Widget>[
-          _topBar(),
+          _topBar(estreito),
           const Spacer(),
           if (c != null && c.value.isInitialized) _controles(c),
           const Spacer(),
@@ -5053,7 +5481,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     );
   }
 
-  Widget _topBar() {
+  Widget _topBar(bool estreito) {
     return SafeArea(
       child: Row(
         children: <Widget>[
@@ -5072,14 +5500,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
           _botaoQualidade(),
           _botaoAudio(),
           _botaoLegenda(),
-          if (widget.provider.isNotEmpty)
+          if (!estreito && widget.provider.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(right: 8),
               child: Text(widget.provider,
                   style: const TextStyle(fontSize: 11, color: Colors.white54)),
             ),
           IconButton(
-            tooltip: 'Abrir no site (fallback)',
+            tooltip: 'Abrir no site',
             icon: const Icon(Icons.language),
             onPressed: _openWeb,
           ),
@@ -5163,8 +5591,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   Widget _botaoLegenda() {
     final bool on = _subSel >= 0 && _subSel < _subs.length;
-    final String rotulo =
-        on ? 'LEG: ${_subs[_subSel].name}' : 'LEGENDAS';
+    final String rotulo = on ? 'LEG: ${_subs[_subSel].name}' : 'LEGENDAS';
     if (_subs.isEmpty) return _pill(rotulo, Icons.subtitles_outlined);
     return PopupMenuButton<int>(
       tooltip: 'Legendas',
@@ -5197,19 +5624,19 @@ class _PlayerScreenState extends State<PlayerScreen> {
       children: <Widget>[
         IconButton(
           tooltip: 'Assistir do comeco',
-          iconSize: 32,
+          iconSize: 30,
           icon: const Icon(Icons.restart_alt),
           onPressed: _doComeco,
         ),
-        const SizedBox(width: 14),
+        const SizedBox(width: 12),
         IconButton(
-          iconSize: 34,
+          iconSize: 32,
           icon: const Icon(Icons.replay_10),
           onPressed: () => _pular(-10),
         ),
-        const SizedBox(width: 10),
+        const SizedBox(width: 8),
         IconButton(
-          iconSize: 58,
+          iconSize: 56,
           icon: Icon(c.value.isPlaying
               ? Icons.pause_circle_filled
               : Icons.play_circle_filled),
@@ -5223,16 +5650,16 @@ class _PlayerScreenState extends State<PlayerScreen> {
             _scheduleHide();
           },
         ),
-        const SizedBox(width: 10),
+        const SizedBox(width: 8),
         IconButton(
-          iconSize: 34,
+          iconSize: 32,
           icon: const Icon(Icons.forward_10),
           onPressed: () => _pular(10),
         ),
-        const SizedBox(width: 14),
+        const SizedBox(width: 12),
         IconButton(
           tooltip: 'Legendas',
-          iconSize: 30,
+          iconSize: 28,
           icon: Icon(_subSel >= 0
               ? Icons.closed_caption
               : Icons.closed_caption_outlined),
@@ -5280,7 +5707,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 }
 
-// ============================= WEBVIEW ===============================
+// ================== WEBVIEW (ANDROID / FALLBACK) =====================
 const List<String> kAdHosts = <String>[
   'doubleclick',
   'googlesyndication',
@@ -5314,114 +5741,6 @@ const String kPopupKiller = r'''
 })();
 ''';
 
-class TrailerView extends StatefulWidget {
-  final String videoKey;
-  const TrailerView({super.key, required this.videoKey});
-
-  @override
-  State<TrailerView> createState() => _TrailerViewState();
-}
-
-class _TrailerViewState extends State<TrailerView> {
-  WebViewController? _ctl;
-  String? _error;
-
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _montar());
-  }
-
-  Future<void> _montar() async {
-    if (!RegExp(r'^[A-Za-z0-9_-]{11}$').hasMatch(widget.videoKey)) {
-      if (mounted) setState(() => _error = 'ID do trailer invalido.');
-      return;
-    }
-    try {
-      final WebViewController ctl = WebViewController();
-      await ctl.setJavaScriptMode(JavaScriptMode.unrestricted);
-      await ctl.setBackgroundColor(Colors.black);
-      await ctl.setNavigationDelegate(NavigationDelegate(
-        onWebResourceError: (WebResourceError e) {
-          if (mounted && e.isForMainFrame == true) {
-            setState(() => _error = 'O YouTube nao conseguiu carregar este trailer.');
-          }
-        },
-      ));
-      final String id = widget.videoKey;
-      await ctl.loadHtmlString('''
-<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden}
-iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
-</style>
-</head>
-<body>
-<iframe
- src="https://www.youtube-nocookie.com/embed/$id?playsinline=1&rel=0"
- title="Trailer"
- allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
- allowfullscreen
- referrerpolicy="strict-origin-when-cross-origin"></iframe>
-</body>
-</html>
-''');
-      if (mounted) setState(() => _ctl = ctl);
-    } catch (_) {
-      if (mounted) setState(() => _error = 'Falha ao abrir o trailer.');
-    }
-  }
-
-  Future<void> _abrirNoYouTube() async {
-    final Uri uri = Uri.https('www.youtube.com', '/watch', {'v': widget.videoKey});
-    try {
-      if (await canLaunchUrl(uri)) {
-        await launchUrl(uri, mode: LaunchMode.externalApplication);
-      }
-    } catch (_) {}
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final WebViewController? ctl = _ctl;
-    return ColoredBox(
-      color: Colors.black,
-      child: Stack(
-        fit: StackFit.expand,
-        children: <Widget>[
-          if (ctl != null)
-            WebViewWidget(controller: ctl)
-          else
-            Center(
-              child: Text(
-                _error ?? 'Carregando trailer...',
-                textAlign: TextAlign.center,
-                style: const TextStyle(color: Colors.white),
-              ),
-            ),
-          Positioned(
-            right: 4,
-            bottom: 4,
-            child: TextButton.icon(
-              onPressed: _abrirNoYouTube,
-              icon: const Icon(Icons.open_in_new, size: 16),
-              label: const Text('Abrir no YouTube'),
-              style: TextButton.styleFrom(
-                backgroundColor: Colors.black87,
-                foregroundColor: Colors.white,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 class WebScreen extends StatefulWidget {
   final String url;
   final String title;
@@ -5442,22 +5761,24 @@ class _WebScreenState extends State<WebScreen> {
   int _progress = 0;
   bool _ui = true;
   String _falha = '';
+  bool _verificando = false;
+  Timer? _vigia;
 
   @override
   void initState() {
     super.initState();
-    try {
-      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-    } catch (_) {}
+    Tela.paisagemTotal();
     WidgetsBinding.instance.addPostFrameCallback((_) => _montar());
   }
 
-  void _montar() {
+  Future<void> _montar() async {
     try {
       final WebViewController ctl = WebViewController();
-      ctl.setJavaScriptMode(JavaScriptMode.unrestricted);
-      ctl.setBackgroundColor(Colors.black);
-      ctl.setNavigationDelegate(
+      await ctl.setJavaScriptMode(JavaScriptMode.unrestricted);
+      await ctl.setBackgroundColor(Colors.black);
+      // UA de Chrome real: e isto que passa a verificacao do Cloudflare.
+      await afinarWebView(ctl);
+      await ctl.setNavigationDelegate(
         NavigationDelegate(
           onProgress: (int p) {
             if (mounted) setState(() => _progress = p);
@@ -5493,7 +5814,7 @@ class _WebScreenState extends State<WebScreen> {
           parsedUrl.path.toLowerCase().endsWith('.m3u8');
       if (isDirectHls) {
         final String source = jsonEncode(widget.url);
-        ctl.loadHtmlString('''
+        await ctl.loadHtmlString('''
 <!doctype html>
 <html>
 <head>
@@ -5506,7 +5827,7 @@ video{width:100%;height:100%;object-fit:contain;background:#000}
 </head>
 <body>
 <video id="player" controls autoplay playsinline></video>
-<div id="msg">Conectando ao servidor de vídeo…</div>
+<div id="msg">Conectando ao servidor de vídeo...</div>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
 <script>
 const video=document.getElementById('player');
@@ -5514,10 +5835,10 @@ const msg=document.getElementById('msg');
 const source=$source;
 function fail(text){msg.textContent=text;msg.style.display='block';}
 video.addEventListener('playing',()=>msg.style.display='none');
-video.addEventListener('error',()=>fail('O servidor não forneceu um vídeo compatível. Tente outro servidor no TMC.'));
+video.addEventListener('error',()=>fail('O servidor não forneceu vídeo compatível. Tente outro servidor.'));
 if(window.Hls && Hls.isSupported()){
   const hls=new Hls({enableWorker:true});
-  hls.on(Hls.Events.ERROR,(_,data)=>{if(data.fatal)fail('Falha ao carregar o vídeo deste servidor. Volte e selecione outro servidor.');});
+  hls.on(Hls.Events.ERROR,(_,data)=>{if(data.fatal)fail('Falha ao carregar o vídeo. Tente outro servidor.');});
   hls.loadSource(source); hls.attachMedia(video);
 }else if(video.canPlayType('application/vnd.apple.mpegurl')){
   video.src=source;
@@ -5529,12 +5850,35 @@ if(window.Hls && Hls.isSupported()){
 </html>
 ''');
       } else {
-        ctl.loadRequest(Uri.parse(widget.url));
+        await ctl.loadRequest(
+          Uri.parse(widget.url),
+          headers: <String, String>{
+            'Referer': '${SuperFlix.base}/',
+            'Origin': SuperFlix.base,
+          },
+        );
       }
       if (mounted) setState(() => _ctl = ctl);
+      _vigia = Timer.periodic(const Duration(seconds: 4), (Timer _) => _checar());
     } catch (e) {
       if (mounted) setState(() => _falha = e.toString());
     }
+  }
+
+  Future<void> _checar() async {
+    final WebViewController? c = _ctl;
+    if (c == null || !mounted) return;
+    String t = '';
+    try {
+      t = (await c.getTitle()) ?? '';
+    } catch (_) {}
+    final String s = t.toLowerCase();
+    final bool cf = s.contains('moment') ||
+        s.contains('verific') ||
+        s.contains('attention required') ||
+        s.contains('cloudflare') ||
+        s.contains('aguardando');
+    if (cf != _verificando && mounted) setState(() => _verificando = cf);
   }
 
   Future<void> _inject() async {
@@ -5545,13 +5889,12 @@ if(window.Hls && Hls.isSupported()){
 
   @override
   void dispose() {
+    _vigia?.cancel();
     try {
       _ctl?.clearCache();
     } catch (_) {}
     CacheKeeper.wipe();
-    try {
-      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-    } catch (_) {}
+    Tela.restaurarApp();
     super.dispose();
   }
 
@@ -5588,11 +5931,6 @@ if(window.Hls && Hls.isSupported()){
                         child: const Text('Tentar novamente'),
                       ),
                     ],
-                    const SizedBox(height: 18),
-                    SelectableText(widget.url,
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(
-                            fontSize: 10.5, color: Colors.white38)),
                   ],
                 ),
               ),
@@ -5606,6 +5944,44 @@ if(window.Hls && Hls.isSupported()){
                 value: _progress / 100,
                 color: kGold,
                 backgroundColor: Colors.black26,
+              ),
+            ),
+          if (_verificando)
+            Positioned(
+              top: 8,
+              left: 0,
+              right: 0,
+              child: Center(
+                child: Material(
+                  color: kCard,
+                  borderRadius: BorderRadius.circular(20),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 6),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: <Widget>[
+                        const SizedBox(
+                          width: 12,
+                          height: 12,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                        const SizedBox(width: 8),
+                        const Text('Verificando acesso...',
+                            style: TextStyle(fontSize: 11)),
+                        const SizedBox(width: 8),
+                        TextButton(
+                          onPressed: () {
+                            _ctl?.reload();
+                            _inject();
+                          },
+                          child: const Text('Recarregar',
+                              style: TextStyle(fontSize: 11, color: kGold)),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
               ),
             ),
           AnimatedOpacity(
