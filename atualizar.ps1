@@ -1263,7 +1263,7 @@ class Resolver {
         embed ??= t;
         break;
       }
-      if (embed != null) break;
+      // Continua procurando um link direto nos outros servidores; o primeiro embed fica como ultimo recurso.
     }
     return embed;
   }
@@ -5449,7 +5449,50 @@ class _WebScreenState extends State<WebScreen> {
           },
         ),
       );
-      ctl.loadRequest(Uri.parse(widget.url));
+      final Uri? parsedUrl = Uri.tryParse(widget.url);
+      final bool isDirectHls = kIsWeb &&
+          parsedUrl != null &&
+          parsedUrl.path.toLowerCase().endsWith('.m3u8');
+      if (isDirectHls) {
+        final String source = jsonEncode(widget.url);
+        ctl.loadHtmlString('''
+<!doctype html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<style>
+html,body{margin:0;width:100%;height:100%;background:#000;color:#fff;font-family:Arial,sans-serif}
+video{width:100%;height:100%;object-fit:contain;background:#000}
+#msg{position:fixed;left:12px;right:12px;bottom:12px;padding:10px;background:#222c;border-radius:8px;font-size:13px}
+</style>
+</head>
+<body>
+<video id="player" controls autoplay playsinline></video>
+<div id="msg">Conectando ao servidor de vídeo…</div>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
+<script>
+const video=document.getElementById('player');
+const msg=document.getElementById('msg');
+const source=$source;
+function fail(text){msg.textContent=text;msg.style.display='block';}
+video.addEventListener('playing',()=>msg.style.display='none');
+video.addEventListener('error',()=>fail('O servidor não forneceu um vídeo compatível. Tente outro servidor no TMC.'));
+if(window.Hls && Hls.isSupported()){
+  const hls=new Hls({enableWorker:true});
+  hls.on(Hls.Events.ERROR,(_,data)=>{if(data.fatal)fail('Falha ao carregar o vídeo deste servidor. Volte e selecione outro servidor.');});
+  hls.loadSource(source); hls.attachMedia(video);
+}else if(video.canPlayType('application/vnd.apple.mpegurl')){
+  video.src=source;
+}else{
+  fail('Este navegador não oferece suporte à reprodução HLS.');
+}
+</script>
+</body>
+</html>
+''');
+      } else {
+        ctl.loadRequest(Uri.parse(widget.url));
+      }
       if (mounted) setState(() => _ctl = ctl);
     } catch (e) {
       if (mounted) setState(() => _falha = e.toString());
