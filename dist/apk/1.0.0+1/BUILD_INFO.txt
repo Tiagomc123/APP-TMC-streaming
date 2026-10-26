@@ -1,6 +1,6 @@
 ﻿Projeto: TMC
 Pacote Flutter: mc
 Versao: 1.0.0+1
-Data: 2026-10-25 20:13:13
+Data: 2026-10-25 20:43:25
 Branch: fix/inline-trailers-webview
-Commit: 4a225dc
+Commit: 47ddf5f

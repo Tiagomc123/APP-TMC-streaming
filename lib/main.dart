@@ -1,4 +1,4 @@
-﻿// =====================================================================
+// =====================================================================
 //  TMC  -  AGREGADOR DE STREAMING                build 6.0  "TMC PLAYER"
 //  ------------------------------------------------------------------
 //  * Trailer: WebView tunada (Referer/Origin) = sem Erro 153
@@ -856,6 +856,17 @@ class TmdbService {
       _pages(isTv ? '/tv/$id/similar' : '/movie/$id/similar', isTv,
           pages: pages);
 
+  /// ID do IMDb do filme (o SuperFlix keye filmes por tt...).
+  static Future<String> imdbDe(int id) async {
+    try {
+      final Map<String, dynamic> d = await _get('/movie/$id/external_ids');
+      final String i = (d['imdb_id'] ?? '').toString();
+      return i.startsWith('tt') ? i : '';
+    } catch (_) {
+      return '';
+    }
+  }
+
   static Future<Map<String, dynamic>> details(int id, bool isTv) => _get(
         isTv ? '/tv/$id' : '/movie/$id',
         <String, String>{
@@ -916,6 +927,19 @@ class SuperFlix {
   static String serieParceira(String id, int s, int e) =>
       '$parceiro/$id/$s/$e';
   static String canalParceiro(String id) => '$parceiro/canal/$id';
+
+  /// VidSrc: catalogo completo, keyed por ID do TMDB.
+  /// E o plano B quando o titulo nao existe no SuperFlix (404).
+  static const String vs1 = 'https://vidsrc.to';
+  static const String vs2 = 'https://vidsrc.xyz';
+
+  static String vidsrcUrl(bool isTv, int id, int s, int e) => isTv
+      ? '$vs1/embed/tv/$id/$s/$e'
+      : '$vs1/embed/movie/$id';
+
+  static String vidsrcUrl2(bool isTv, int id, int s, int e) => isTv
+      ? '$vs2/embed/tv/$id/$s/$e'
+      : '$vs2/embed/movie/$id';
 
   static List<String> rotasJson(bool isTv, String id, int s, int e) => isTv
       ? <String>[
@@ -1089,6 +1113,7 @@ class Resolver {
       String rota, String provider, String page) async {
     final http.Response? res = await SuperFlix.get(rota, page);
     if (res == null) return null;
+    if (res.statusCode == 404) return null;
     final String body = res.body;
     final String head = body.trimLeft();
 
@@ -4916,17 +4941,19 @@ class _DetailsScreenState extends State<DetailsScreen> {
   }
 }
 
-// ================== TELA DE EMBUTIR (WEB - IFRAME) ===================
+// ============ TELA DE EMBUTIR (WEB - IFRAME + 3 SERVIDORES) ==========
 class FrameScreen extends StatefulWidget {
   final String url;
   final String title;
   final String urlAlt;
+  final String urlAlt2;
 
   const FrameScreen({
     super.key,
     required this.url,
     required this.title,
     this.urlAlt = '',
+    this.urlAlt2 = '',
   });
 
   @override
@@ -4934,11 +4961,21 @@ class FrameScreen extends StatefulWidget {
 }
 
 class _FrameScreenState extends State<FrameScreen> {
+  int _i = 0;
   int _v = 0;
-  bool _alt = false;
 
-  String get _atual =>
-      (_alt && widget.urlAlt.isNotEmpty) ? widget.urlAlt : widget.url;
+  List<String> get _servidores => <String>[
+        widget.url,
+        widget.urlAlt,
+        widget.urlAlt2,
+      ].where((String u) => u.isNotEmpty).toList();
+
+  String get _atual {
+    final List<String> l = _servidores;
+    if (l.isEmpty) return widget.url;
+    if (_i >= l.length) return l.last;
+    return l[_i];
+  }
 
   @override
   void initState() {
@@ -4957,15 +4994,29 @@ class _FrameScreenState extends State<FrameScreen> {
     super.dispose();
   }
 
+  void _proximo() {
+    final List<String> l = _servidores;
+    if (l.length < 2) return;
+    setState(() {
+      _i = (_i + 1) % l.length;
+      _v++;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      duration: const Duration(seconds: 2),
+      content: Text('Servidor ${_i + 1} de ${l.length}'),
+    ));
+  }
+
   @override
   Widget build(BuildContext context) {
+    final List<String> l = _servidores;
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
         children: <Widget>[
           Positioned.fill(
             child: KeyedSubtree(
-              key: ValueKey<int>(_v + (_alt ? 1000 : 0)),
+              key: ValueKey<int>(_v + _i * 1000),
               child: TmcFrame(url: _atual),
             ),
           ),
@@ -4991,14 +5042,11 @@ class _FrameScreenState extends State<FrameScreen> {
                         style: const TextStyle(fontWeight: FontWeight.w600),
                       ),
                     ),
-                    if (widget.urlAlt.isNotEmpty)
+                    if (l.length > 1)
                       TextButton(
-                        onPressed: () => setState(() {
-                          _alt = !_alt;
-                          _v++;
-                        }),
+                        onPressed: _proximo,
                         child: Text(
-                          _alt ? 'SERVIDOR 2' : 'SERVIDOR 1',
+                          'SERVIDOR ${_i + 1}/${l.length}',
                           style: const TextStyle(
                               color: kGold,
                               fontSize: 11,
@@ -5020,12 +5068,32 @@ class _FrameScreenState extends State<FrameScreen> {
               ),
             ),
           ),
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 6,
+            child: IgnorePointer(
+              child: Center(
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.55),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: const Text(
+                    '404 ou travou? Toque em SERVIDOR para trocar a fonte.',
+                    style: TextStyle(fontSize: 10, color: Colors.white60),
+                  ),
+                ),
+              ),
+            ),
+          ),
         ],
       ),
     );
   }
 }
-
 // ======================= PLAYER NATIVO (ANDROID) =====================
 class PlayerScreen extends StatefulWidget {
   final String url;
