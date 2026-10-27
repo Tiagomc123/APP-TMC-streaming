@@ -4,8 +4,7 @@ import 'package:flutter/material.dart';
 import '../../core/theme/app_theme.dart';
 import '../../data/models/media_item.dart';
 
-/// Capa do catalogo. Com [showMeta] falso fica ainda mais limpa
-/// (so titulo, nota e barra de progresso) â€” padrao das grades.
+/// Card de poster com cantos arredondados, nota e barra de progresso.
 class PosterCard extends StatefulWidget {
   const PosterCard({
     super.key,
@@ -14,15 +13,15 @@ class PosterCard extends StatefulWidget {
     this.autofocus = false,
     this.width = 138,
     this.progress,
-    this.showMeta = false,
   });
 
   final MediaItem item;
   final VoidCallback onTap;
   final bool autofocus;
   final double width;
+
+  /// 0..1 quando o titulo tem progresso salvo.
   final double? progress;
-  final bool showMeta;
 
   @override
   State<PosterCard> createState() => _PosterCardState();
@@ -59,14 +58,14 @@ class _PosterCardState extends State<PosterCard> {
                             color: AppTheme.surface,
                             borderRadius: AppTheme.br,
                             border: Border.all(
-                              color: _focused ? Colors.white70 : Colors.white12,
-                              width: _focused ? 2 : 1,
+                              color: _focused ? AppTheme.gold : Colors.white12,
+                              width: _focused ? 2.5 : 1,
                             ),
                             boxShadow: _focused
                                 ? <BoxShadow>[
                                     BoxShadow(
-                                      color: Colors.black.withValues(alpha: .55),
-                                      blurRadius: 16,
+                                      color: AppTheme.gold.withValues(alpha: .25),
+                                      blurRadius: 18,
                                     ),
                                   ]
                                 : null,
@@ -99,7 +98,7 @@ class _PosterCardState extends State<PosterCard> {
                             borderRadius: BorderRadius.circular(3),
                             child: LinearProgressIndicator(
                               value: progress,
-                              minHeight: 3,
+                              minHeight: 4,
                               backgroundColor: Colors.white24,
                               valueColor: const AlwaysStoppedAnimation<Color>(AppTheme.gold),
                             ),
@@ -108,22 +107,21 @@ class _PosterCardState extends State<PosterCard> {
                     ],
                   ),
                 ),
-                const SizedBox(height: 6),
+                const SizedBox(height: 7),
                 Text(
                   widget.item.title,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600),
+                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
                 ),
-                if (widget.showMeta)
-                  Text(
-                    widget.item.year.isEmpty
-                        ? widget.item.typeLabel
-                        : '${widget.item.year} - ${widget.item.typeLabel}',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 10, color: Colors.white38),
-                  ),
+                Text(
+                  widget.item.year.isEmpty
+                      ? widget.item.typeLabel
+                      : '${widget.item.year} - ${widget.item.typeLabel}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 10, color: Colors.white38),
+                ),
               ],
             ),
           ),
@@ -141,19 +139,23 @@ class _RatingBadge extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
       decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: .7),
-        borderRadius: BorderRadius.circular(7),
+        color: Colors.black.withValues(alpha: .72),
+        borderRadius: BorderRadius.circular(8),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: <Widget>[
-          const Icon(Icons.star_rounded, size: 10, color: AppTheme.gold),
-          const SizedBox(width: 2),
+          const Icon(Icons.star_rounded, size: 11, color: AppTheme.gold),
+          const SizedBox(width: 3),
           Text(
             value.toStringAsFixed(1),
-            style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: Colors.white),
+            style: const TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.w700,
+              color: Colors.white,
+            ),
           ),
         ],
       ),

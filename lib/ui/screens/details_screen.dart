@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 
@@ -38,12 +36,10 @@ class _DetailsScreenState extends State<DetailsScreen> {
   List<Map<String, dynamic>> _similar = const <Map<String, dynamic>>[];
   bool _loading = true;
   bool _fav = false;
-  bool _busy = false;
-  String _status = '';
+  bool _resolving = false;
 
   int _season = 1;
   int _episode = 1;
-  String _imdb = '';
   String? _trailerKey;
   bool _trailerOpen = false;
   Duration _resume = Duration.zero;
@@ -63,7 +59,6 @@ class _DetailsScreenState extends State<DetailsScreen> {
     season: _season,
     episode: _episode,
     year: widget.item.year,
-    imdbId: _imdb,
     poster: widget.item.poster,
   );
 
@@ -72,29 +67,31 @@ class _DetailsScreenState extends State<DetailsScreen> {
   }
 
   Future<void> _load() async {
-    final Map<String, dynamic>? details = widget.item.isTv
+    final Map<String, dynamic>? d = widget.item.isTv
         ? await widget.repository.tvDetails(widget.item.id)
         : await widget.repository.movieDetails(widget.item.id);
 
-    final List<Map<String, dynamic>> similar = await widget.repository.similar(
+    final List<Map<String, dynamic>> sim = await widget.repository.similar(
       widget.item.id,
       widget.item.isTv,
     );
 
     if (!mounted) return;
     setState(() {
-      _details = details;
-      _similar = similar;
-      _imdb = (details?['external_ids']?['imdb_id'] ?? '').toString();
-      _trailerKey = _pickTrailer(details);
+      _details = d;
+      _similar = sim;
+      _trailerKey = _pickTrailer(d);
       _loading = false;
     });
 
+    // pre-aquece a resolucao enquanto o usuario le a sinopse
     widget.resolver.prefetch(_ref);
   }
 
-  String? _pickTrailer(Map<String, dynamic>? details) {
-    final dynamic videosNode = details?['videos'];
+  /// Seleciona somente trailers hospedados no YouTube e retornados pelo TMDB,
+  /// priorizando audio PT-BR.
+  String? _pickTrailer(Map<String, dynamic>? d) {
+    final dynamic videosNode = d?['videos'];
     final List<dynamic> videos = videosNode is Map
         ? ((videosNode['results'] as List<dynamic>?) ?? const <dynamic>[])
         : const <dynamic>[];
@@ -106,6 +103,7 @@ class _DetailsScreenState extends State<DetailsScreen> {
       final Map<String, dynamic> m = v.cast<String, dynamic>();
       if (m['site'] != 'YouTube') continue;
       if (m['type'] != 'Trailer') continue;
+
       final String key = (m['key'] ?? '').toString();
       if (key.isEmpty) continue;
       candidates.add(m);
@@ -118,59 +116,48 @@ class _DetailsScreenState extends State<DetailsScreen> {
             (language == 'pt' ? 3 : 0) +
             (language == 'en' ? 1 : 0);
       }
+
       return score(b).compareTo(score(a));
     });
     return candidates.first['key']?.toString();
   }
 
   Future<void> _play() async {
-    if (_busy) return;
-    setState(() {
-      _busy = true;
-      _status = 'Procurando fonte...';
-    });
-
-    final StreamSubscription<ResolverStatus> sub =
-        widget.resolver.status.listen((ResolverStatus s) {
-      if (mounted) setState(() => _status = s.message);
-    });
-
-    ResolvedStream? stream;
+    if (_resolving) return;
+    setState(() => _resolving = true);
+    final MediaRef ref = _ref;
     try {
-      stream = await widget.resolver
-          .resolveDirect(_ref)
-          .timeout(const Duration(seconds: 40));
-    } catch (_) {
-      stream = null;
-    }
+      final ResolvedStream? resolved = await widget.resolver.resolve(ref);
+      if (!mounted) return;
 
-    await sub.cancel();
-    if (!mounted) return;
-    setState(() {
-      _busy = false;
-      _status = '';
-    });
+      if (resolved == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'As fontes não devolveram um vídeo disponível. Tente novamente.',
+            ),
+          ),
+        );
+        return;
+      }
 
-    if (stream == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Nenhuma API respondeu. Tente novamente.')),
-      );
-      return;
-    }
+      await LibraryRepository.instance.addHistory(ref, _resume, Duration.zero);
 
-    await LibraryRepository.instance.addHistory(_ref, _resume, Duration.zero);
-    if (!mounted) return;
-
-    await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => PlayerScreen(
-          stream: stream!,
-          ref: _ref,
-          resolver: widget.resolver,
+      if (!mounted) return;
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => PlayerScreen(
+            stream: resolved,
+            ref: ref,
+            resolver: widget.resolver,
+          ),
         ),
-      ),
-    );
-    if (mounted) setState(_refreshResume);
+      );
+
+      if (mounted) setState(_refreshResume);
+    } finally {
+      if (mounted) setState(() => _resolving = false);
+    }
   }
 
   @override
@@ -182,14 +169,16 @@ class _DetailsScreenState extends State<DetailsScreen> {
       );
     }
 
-    final String backdrop =
-        (_details?['backdrop_path'] ?? widget.item.backdrop).toString();
-    final String overview =
-        (_details?['overview'] ?? widget.item.overview).toString().trim();
-    final String date = (_details?['release_date'] ??
-            _details?['first_air_date'] ??
-            widget.item.date)
+    final String backdrop = (_details?['backdrop_path'] ?? widget.item.backdrop)
         .toString();
+    final String overview = (_details?['overview'] ?? widget.item.overview)
+        .toString()
+        .trim();
+    final String date =
+        (_details?['release_date'] ??
+                _details?['first_air_date'] ??
+                widget.item.date)
+            .toString();
     final double rating =
         ((_details?['vote_average'] ?? widget.item.rating) as num).toDouble();
 
@@ -200,7 +189,7 @@ class _DetailsScreenState extends State<DetailsScreen> {
         child: CustomScrollView(
           slivers: <Widget>[
             SliverAppBar(
-              expandedHeight: TvDetector.isTv ? 330 : 250,
+              expandedHeight: TvDetector.isTv ? 340 : 260,
               pinned: true,
               backgroundColor: AppTheme.bg,
               flexibleSpace: FlexibleSpaceBar(
@@ -211,7 +200,8 @@ class _DetailsScreenState extends State<DetailsScreen> {
                       CachedNetworkImage(
                         imageUrl: '${AppConfig.tmdbImageBase}/w1280$backdrop',
                         fit: BoxFit.cover,
-                        errorWidget: (_, _, _) => Container(color: AppTheme.surface),
+                        errorWidget: (_, _, _) =>
+                            Container(color: AppTheme.surface),
                       )
                     else
                       Container(color: AppTheme.surface),
@@ -230,7 +220,7 @@ class _DetailsScreenState extends State<DetailsScreen> {
             ),
             SliverToBoxAdapter(
               child: Padding(
-                padding: const EdgeInsets.fromLTRB(18, 6, 18, 0),
+                padding: const EdgeInsets.fromLTRB(20, 8, 20, 0),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: <Widget>[
@@ -238,7 +228,7 @@ class _DetailsScreenState extends State<DetailsScreen> {
                       widget.item.title,
                       style: const TextStyle(
                         color: Colors.white,
-                        fontSize: 25,
+                        fontSize: 26,
                         fontWeight: FontWeight.w900,
                       ),
                     ),
@@ -246,72 +236,83 @@ class _DetailsScreenState extends State<DetailsScreen> {
                     Row(
                       children: <Widget>[
                         if (date.length >= 4)
-                          Text(date.substring(0, 4),
-                              style: const TextStyle(color: Colors.white54, fontSize: 12)),
+                          Text(
+                            date.substring(0, 4),
+                            style: const TextStyle(color: Colors.white54),
+                          ),
                         const SizedBox(width: 12),
-                        const Icon(Icons.star_rounded, color: AppTheme.gold, size: 16),
+                        const Icon(
+                          Icons.star_rounded,
+                          color: AppTheme.gold,
+                          size: 17,
+                        ),
                         const SizedBox(width: 4),
-                        Text(rating.toStringAsFixed(1),
-                            style: const TextStyle(color: Colors.white70, fontSize: 12)),
+                        Text(
+                          rating.toStringAsFixed(1),
+                          style: const TextStyle(color: Colors.white70),
+                        ),
                         const SizedBox(width: 12),
                         if (widget.item.isTv)
-                          Text('T$_season E$_episode',
-                              style: const TextStyle(color: Colors.white54, fontSize: 12)),
+                          Text(
+                            'T$_season E$_episode',
+                            style: const TextStyle(color: Colors.white54),
+                          ),
                       ],
                     ),
                     const SizedBox(height: 16),
-                    if (_busy) ...<Widget>[
-                      Row(
-                        children: <Widget>[
-                          const SizedBox(
-                            width: 15,
-                            height: 15,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: Text(
-                              _status.isEmpty ? 'Procurando fonte...' : _status,
-                              style: const TextStyle(color: Colors.white70, fontSize: 12),
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 12),
-                    ],
                     Wrap(
                       spacing: 12,
                       runSpacing: 12,
                       children: <Widget>[
                         TvButton(
-                          label: _resume.inSeconds > 5
+                          label: _resolving
+                              ? 'BUSCANDO FONTE...'
+                              : _resume.inSeconds > 5
                               ? ProgressService.resumeLabel(_resume)
                               : 'ASSISTIR',
-                          icon: Icons.play_arrow_rounded,
+                          icon: _resolving
+                              ? Icons.sync_rounded
+                              : Icons.play_arrow,
                           primary: true,
                           autofocus: true,
-                          onPressed: () => unawaited(_play()),
+                          onPressed: () => _play(),
                         ),
                         if (_trailerKey != null)
                           TvButton(
                             label: _trailerOpen ? 'FECHAR TRAILER' : 'TRAILER',
-                            icon: _trailerOpen ? Icons.close_rounded : Icons.movie_outlined,
-                            onPressed: () => setState(() => _trailerOpen = !_trailerOpen),
+                            icon: _trailerOpen
+                                ? Icons.close
+                                : Icons.movie_outlined,
+                            onPressed: () =>
+                                setState(() => _trailerOpen = !_trailerOpen),
                           ),
                         TvButton(
                           label: _fav ? 'NA LISTA' : 'MINHA LISTA',
-                          icon: _fav ? Icons.favorite_rounded : Icons.favorite_border_rounded,
+                          icon: _fav ? Icons.favorite : Icons.favorite_border,
                           onPressed: () async {
-                            await LibraryRepository.instance.toggleFavorite(widget.item);
+                            await LibraryRepository.instance.toggleFavorite(
+                              widget.item,
+                            );
                             if (!mounted) return;
-                            setState(() =>
-                                _fav = LibraryRepository.instance.isFavorite(widget.item.key));
+                            setState(
+                              () => _fav = LibraryRepository.instance
+                                  .isFavorite(widget.item.key),
+                            );
                           },
                         ),
                       ],
                     ),
                     if (_trailerOpen && _trailerKey != null) ...<Widget>[
-                      const SizedBox(height: 16),
+                      const SizedBox(height: 18),
+                      const Text(
+                        'TRAILER OFICIAL',
+                        style: TextStyle(
+                          color: Colors.white54,
+                          fontSize: 12,
+                          letterSpacing: 2,
+                        ),
+                      ),
+                      const SizedBox(height: 10),
                       EmbeddedTrailer(
                         videoKey: _trailerKey!,
                         title: widget.item.title,
@@ -319,18 +320,31 @@ class _DetailsScreenState extends State<DetailsScreen> {
                         onClose: () => setState(() => _trailerOpen = false),
                       ),
                     ],
-                    const SizedBox(height: 18),
+                    const SizedBox(height: 20),
+                    const Text(
+                      'SINOPSE',
+                      style: TextStyle(
+                        color: Colors.white54,
+                        fontSize: 12,
+                        letterSpacing: 2,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
                     Text(
                       overview.isEmpty ? 'Sem sinopse disponivel.' : overview,
-                      style: const TextStyle(color: Colors.white60, height: 1.5, fontSize: 13),
+                      style: const TextStyle(
+                        color: Colors.white70,
+                        height: 1.5,
+                      ),
                     ),
-                    const SizedBox(height: 20),
+                    const SizedBox(height: 22),
                   ],
                 ),
               ),
             ),
             if (widget.item.isTv) SliverToBoxAdapter(child: _seasonsSection()),
-            if (_similar.isNotEmpty) SliverToBoxAdapter(child: _similarSection()),
+            if (_similar.isNotEmpty)
+              SliverToBoxAdapter(child: _similarSection()),
             const SliverToBoxAdapter(child: SizedBox(height: 40)),
           ],
         ),
@@ -347,13 +361,17 @@ class _DetailsScreenState extends State<DetailsScreen> {
     if (seasons.isEmpty) return const SizedBox.shrink();
 
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 18),
+      padding: const EdgeInsets.symmetric(horizontal: 20),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
           const Text(
             'TEMPORADAS',
-            style: TextStyle(color: Colors.white54, fontSize: 11, letterSpacing: 2),
+            style: TextStyle(
+              color: Colors.white54,
+              fontSize: 12,
+              letterSpacing: 2,
+            ),
           ),
           const SizedBox(height: 10),
           SizedBox(
@@ -379,7 +397,11 @@ class _DetailsScreenState extends State<DetailsScreen> {
           const SizedBox(height: 14),
           const Text(
             'EPISODIOS',
-            style: TextStyle(color: Colors.white54, fontSize: 11, letterSpacing: 2),
+            style: TextStyle(
+              color: Colors.white54,
+              fontSize: 12,
+              letterSpacing: 2,
+            ),
           ),
           const SizedBox(height: 10),
           _episodesGrid(),
@@ -410,7 +432,7 @@ class _DetailsScreenState extends State<DetailsScreen> {
               _episode = n;
               _refreshResume();
             });
-            unawaited(_play());
+            _play();
           },
         );
       },
@@ -419,42 +441,60 @@ class _DetailsScreenState extends State<DetailsScreen> {
 
   Widget _similarSection() {
     return Padding(
-      padding: const EdgeInsets.only(top: 28),
-      child: SizedBox(
-        height: TvDetector.isTv ? 250 : 205,
-        child: ListView.separated(
-          scrollDirection: Axis.horizontal,
-          padding: const EdgeInsets.symmetric(horizontal: 18),
-          itemCount: _similar.length,
-          separatorBuilder: (_, _) => const SizedBox(width: 10),
-          itemBuilder: (BuildContext ctx, int i) {
-            final Map<String, dynamic> m = _similar[i];
-            final String poster = (m['poster_path'] ?? '').toString();
-            return SizedBox(
-              width: 126,
-              child: GestureDetector(
-                onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                    builder: (_) => DetailsScreen(
-                      item: MediaItem.fromJson(m, widget.item.isTv),
-                      resolver: widget.resolver,
-                      repository: widget.repository,
+      padding: const EdgeInsets.only(top: 30),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 20),
+            child: Text(
+              'SEMELHANTES',
+              style: TextStyle(
+                color: Colors.white54,
+                fontSize: 12,
+                letterSpacing: 2,
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
+          SizedBox(
+            height: TvDetector.isTv ? 250 : 210,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              itemCount: _similar.length,
+              separatorBuilder: (_, _) => const SizedBox(width: 12),
+              itemBuilder: (BuildContext ctx, int i) {
+                final Map<String, dynamic> m = _similar[i];
+                final String poster = (m['poster_path'] ?? '').toString();
+                return SizedBox(
+                  width: 130,
+                  child: GestureDetector(
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => DetailsScreen(
+                          item: MediaItem.fromJson(m, widget.item.isTv),
+                          resolver: widget.resolver,
+                          repository: widget.repository,
+                        ),
+                      ),
+                    ),
+                    child: ClipRRect(
+                      borderRadius: AppTheme.br,
+                      child: poster.isEmpty
+                          ? Container(color: AppTheme.surface)
+                          : CachedNetworkImage(
+                              imageUrl:
+                                  '${AppConfig.tmdbImageBase}/w342$poster',
+                              fit: BoxFit.cover,
+                            ),
                     ),
                   ),
-                ),
-                child: ClipRRect(
-                  borderRadius: AppTheme.br,
-                  child: poster.isEmpty
-                      ? Container(color: AppTheme.surface)
-                      : CachedNetworkImage(
-                          imageUrl: '${AppConfig.tmdbImageBase}/w342$poster',
-                          fit: BoxFit.cover,
-                        ),
-                ),
-              ),
-            );
-          },
-        ),
+                );
+              },
+            ),
+          ),
+        ],
       ),
     );
   }

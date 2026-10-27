@@ -40,14 +40,20 @@ class _Health {
 }
 
 /// =============================================================================
-///  RESOLVEDOR DE LINK DIRETO
+///  SERVICO DE EXTRACAO DE LINK DIRETO
 ///
-///  Sem WebView: o resultado e SEMPRE um manifesto .m3u8/.mp4.
-///   - cache em memoria com TTL + dedupe de chamadas concorrentes;
-///   - corrida escalonada entre APIs (1a sai na hora, 2a em 1.2s...);
-///   - rotacao de User-Agent antes de cada fonte (anti-fingerprint);
-///   - audio PT-BR promovido para a primeira faixa quando o HLS oferece varias;
-///   - saude por fonte persistida, usada para reordenar.
+///  Resolve um [MediaRef] em um [ResolvedStream] (URL .m3u8/.mp4 limpa).
+///
+///  Garantias:
+///   - cache em memoria (TTL) + dedupe de chamadas concorrentes;
+///   - corrida escalonada entre provedores: o 1o que responder vence e os
+///     seguintes ja estao aquecidos para servir de fallback imediato;
+///   - rotacao de User-Agent a cada fonte testada (anti-fingerprint);
+///   - audio PT-BR promovido para a primeira posicao quando o HLS oferece
+///     varias faixas;
+///   - ordenacao dinamica por saude do provedor (persistida);
+///   - `exclude` para o player pedir "outra fonte" quando o stream morre;
+///   - stream de [ResolverStatus] para a UI mostrar "testando fonte 2 de 5".
 /// =============================================================================
 class VideoResolverService {
   VideoResolverService({
@@ -75,17 +81,26 @@ class VideoResolverService {
   List<StreamProvider> get providers =>
       List<StreamProvider>.unmodifiable(_providers);
 
-  void _emit(String message, {String? providerId, int attempt = 0, int total = 0}) {
+  void _emit(
+    String message, {
+    String? providerId,
+    int attempt = 0,
+    int total = 0,
+  }) {
     if (!_status.isClosed) {
-      _status.add(ResolverStatus(
-        message: message,
-        providerId: providerId,
-        attempt: attempt,
-        total: total,
-      ));
+      _status.add(
+        ResolverStatus(
+          message: message,
+          providerId: providerId,
+          attempt: attempt,
+          total: total,
+        ),
+      );
     }
   }
 
+  /// Resolve. `force` ignora cache; `providerId` forca uma fonte;
+  /// `exclude` remove fontes ja tentadas.
   Future<ResolvedStream?> resolve(
     MediaRef ref, {
     String? providerId,
@@ -120,20 +135,6 @@ class VideoResolverService {
     return out;
   }
 
-  /// Resolve e, se tudo falhar, tenta a fonte de maior prioridade sozinha
-  /// (evita perder por timeout da corrida).
-  Future<ResolvedStream?> resolveDirect(MediaRef ref) async {
-    final ResolvedStream? first = await resolve(ref);
-    if (first != null) return first;
-
-    final List<StreamProvider> pool = _ordered();
-    if (pool.isEmpty) return null;
-
-    final StreamProvider fallback = pool.first;
-    _emit('Tentando ${fallback.label} novamente...', providerId: fallback.id);
-    return resolve(ref, providerId: fallback.id, force: true);
-  }
-
   Future<ResolvedStream?> _resolveInternal(
     MediaRef ref, {
     String? providerId,
@@ -141,7 +142,10 @@ class VideoResolverService {
   }) async {
     final Map<String, List<String>> sources =
         await ExternalSourcesRepository.instance.load();
-    final List<StreamProvider> pool = _ordered(providerId: providerId, exclude: exclude);
+    final List<StreamProvider> pool = _ordered(
+      providerId: providerId,
+      exclude: exclude,
+    );
     if (pool.isEmpty) {
       _emit('Nenhuma fonte compativel');
       return null;
@@ -168,7 +172,8 @@ class VideoResolverService {
     return null;
   }
 
-  /// Coloca a faixa de audio PT-BR na primeira posicao.
+  /// Se o HLS expoe varias faixas de audio, o PT-BR vai para a primeira
+  /// posicao (o player escolhe a primeira quando ninguem selecionou nada).
   ResolvedStream _preferPtBrAudio(ResolvedStream stream) {
     if (stream.audioTracks.length < 2) return stream;
     final List<HlsAudioTrack> ordered = List<HlsAudioTrack>.of(stream.audioTracks)
@@ -196,13 +201,17 @@ class VideoResolverService {
         .toList();
 
     list.sort((StreamProvider a, StreamProvider b) {
-      final int byHealth =
-          (_health[b.id]?.score ?? 0.5).compareTo(_health[a.id]?.score ?? 0.5);
+      final int byHealth = (_health[b.id]?.score ?? 0.5).compareTo(
+        _health[a.id]?.score ?? 0.5,
+      );
       return byHealth != 0 ? byHealth : a.priority.compareTo(b.priority);
     });
     return list;
   }
 
+  /// Corrida escalonada: a fonte 1 sai na hora, a 2 em 1.2 s, a 3 em 2.4 s...
+  /// Se a 1 travar, a 2 ja esta a caminho. Antes de cada fonte o User-Agent
+  /// gira, o que derruba boa parte das telas de verificacao.
   Future<ResolvedStream?> _staggeredRace(
     List<StreamProvider> pool,
     MediaRef ref,
@@ -230,7 +239,10 @@ class VideoResolverService {
           try {
             final ResolvedStream? s = await provider.resolve(ref, ctx);
             if (s != null && !completer.isCompleted) {
-              _emit('Reproduzindo via ${provider.label}', providerId: provider.id);
+              _emit(
+                'Reproduzindo via ${provider.label}',
+                providerId: provider.id,
+              );
               completer.complete(s);
             }
           } catch (e) {
@@ -251,6 +263,7 @@ class VideoResolverService {
     );
   }
 
+  /// Pre-aquece a resolucao em background (chamar ao abrir a tela de detalhes).
   void prefetch(MediaRef ref) {
     if (_cache[ref.key]?.alive ?? false) return;
     unawaited(resolve(ref).catchError((Object _) => null));
@@ -259,17 +272,8 @@ class VideoResolverService {
   void invalidate([String? key]) =>
       key == null ? _cache.clear() : _cache.remove(key);
 
-  /// Saude atual (0..1) por fonte, para o painel do app.
-  Map<String, double> healthScores() => <String, double>{
-        for (final StreamProvider p in _providers) p.id: _health[p.id]?.score ?? 0.5,
-      };
-
-  void resetHealth() {
-    _health.clear();
-    unawaited(_persistHealth());
-  }
-
-  static const String _healthKey = 'resolver_health_v2';
+  // ------------------------------ saude persistida ---------------------------
+  static const String _healthKey = 'resolver_health_v1';
 
   Future<void> _loadHealth() async {
     try {
@@ -293,7 +297,10 @@ class VideoResolverService {
       await prefs.setString(
         _healthKey,
         _health.entries
-            .map((MapEntry<String, _Health> e) => '${e.key},${e.value.ok},${e.value.fail}')
+            .map(
+              (MapEntry<String, _Health> e) =>
+                  '${e.key},${e.value.ok},${e.value.fail}',
+            )
             .join(';'),
       );
     } catch (_) {}

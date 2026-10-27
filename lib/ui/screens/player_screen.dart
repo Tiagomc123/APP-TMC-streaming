@@ -3,14 +3,17 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../core/app_config.dart';
 import '../../data/models/media_ref.dart';
 import '../../data/models/resolved_stream.dart';
 import '../../services/progress_service.dart';
 import '../../services/stream/url_sanitizer.dart';
 import '../../services/stream/video_resolver_service.dart';
 import '../widgets/custom_video_player.dart';
+import 'web_player_screen.dart';
 
-/// Player 100% nativo. Recebe sempre um manifesto .m3u8/.mp4 sanitizado.
+bool usesWebPlayerFallback(ResolvedStream stream) => !stream.playable;
+
 class PlayerScreen extends StatefulWidget {
   const PlayerScreen({
     super.key,
@@ -35,33 +38,19 @@ class _PlayerScreenState extends State<PlayerScreen> {
   @override
   void initState() {
     super.initState();
-    _stream = _sanitize(widget.stream);
+    _stream = widget.stream;
     _usedProviders.add(widget.stream.providerId);
-    unawaited(_landscape());
+    unawaited(_enterLandscape());
   }
 
-  /// Garante que nada de anuncio/rastreador chegue ao player.
-  ResolvedStream _sanitize(ResolvedStream stream) {
-    final String? clean = UrlSanitizer.extractMedia(stream.url.toString());
-    if (clean == null || clean == stream.url.toString()) return stream;
-    return stream.copyWith(url: Uri.parse(clean));
-  }
-
-  Future<void> _landscape() async {
+  Future<void> _enterLandscape() async {
     await SystemChrome.setPreferredOrientations(<DeviceOrientation>[
       DeviceOrientation.landscapeLeft,
       DeviceOrientation.landscapeRight,
     ]);
   }
 
-  @override
-  void dispose() {
-    unawaited(SystemChrome.setPreferredOrientations(<DeviceOrientation>[
-      DeviceOrientation.portraitUp,
-    ]));
-    super.dispose();
-  }
-
+  /// Chamado pelo player quando a fonte morre: pede outra, excluindo as usadas.
   Future<ResolvedStream?> _fallback() async {
     final ResolvedStream? alt = await widget.resolver.resolve(
       widget.ref,
@@ -70,13 +59,49 @@ class _PlayerScreenState extends State<PlayerScreen> {
     );
     if (alt != null) {
       _usedProviders.add(alt.providerId);
-      if (mounted) setState(() => _stream = _sanitize(alt));
+      if (mounted) setState(() => _stream = alt);
     }
     return alt;
   }
 
+  void _useNative(String url) {
+    final String clean = UrlSanitizer.extractMedia(url) ?? url;
+    final Uri media = Uri.parse(clean);
+    final bool isHls = media.path.toLowerCase().endsWith('.m3u8');
+    setState(() {
+      _stream = ResolvedStream(
+        url: media,
+        kind: isHls ? StreamKind.hls : StreamKind.mp4,
+        providerId: 'web',
+        providerLabel: 'Player nativo',
+        headers: <String, String>{
+          'User-Agent': AppConfig.userAgent,
+          'Referer': (_stream.embedPage ?? _stream.url).toString(),
+        },
+      );
+    });
+  }
+
+  @override
+  void dispose() {
+    unawaited(
+      SystemChrome.setPreferredOrientations(<DeviceOrientation>[
+        DeviceOrientation.portraitUp,
+      ]),
+    );
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
+    if (usesWebPlayerFallback(_stream)) {
+      return WebPlayerScreen(
+        url: _stream.embedPage ?? _stream.url,
+        title: widget.ref.display,
+        onUseNative: _useNative,
+      );
+    }
+
     return Scaffold(
       backgroundColor: Colors.black,
       body: CustomVideoPlayer(
@@ -90,10 +115,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
           _lastPosition = p;
           unawaited(ProgressService.save(widget.ref, p, d));
         },
-        onCompleted: () => unawaited(ProgressService.complete(widget.ref)),
+        onCompleted: () {
+          unawaited(ProgressService.complete(widget.ref));
+        },
         onNeedFallback: _fallback,
         onExit: () {
-          unawaited(ProgressService.save(widget.ref, _lastPosition, _lastPosition));
+          unawaited(
+            ProgressService.save(widget.ref, _lastPosition, _lastPosition),
+          );
         },
       ),
     );

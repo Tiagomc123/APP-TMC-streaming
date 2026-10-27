@@ -27,17 +27,24 @@ class TmdbPage {
 }
 
 class TmdbRepository {
-  Future<Map<String, dynamic>> _get(String path, [Map<String, String>? q]) async {
+  Future<Map<String, dynamic>> _get(
+    String path, [
+    Map<String, String>? q,
+  ]) async {
     final Map<String, String> params = <String, String>{
       'path': path,
       'language': 'pt-BR',
       'region': 'BR',
       ...?q,
     };
-    final Uri uri = Uri.parse(AppConfig.tmdbProxyBase).replace(queryParameters: params);
+    final Uri uri = Uri.parse(AppConfig.tmdbProxyBase)
+        .replace(queryParameters: params);
 
     final http.Response res = await http
-        .get(uri, headers: <String, String>{'apikey': AppConfig.supabasePublishableKey})
+        .get(
+          uri,
+          headers: <String, String>{'apikey': AppConfig.supabasePublishableKey},
+        )
         .timeout(const Duration(seconds: 25));
 
     if (res.statusCode != 200) {
@@ -53,32 +60,46 @@ class TmdbRepository {
     Map<String, String>? query,
     bool mixedMedia = false,
   }) async {
-    final Map<String, dynamic> data = await _get(path, <String, String>{
+    final Map<String, String> params = <String, String>{
       'page': '$page',
       ...?query,
-    });
+    };
+    final Map<String, dynamic> data = await _get(path, params);
     final List<dynamic> results =
         (data['results'] as List<dynamic>?) ?? const <dynamic>[];
-    final Iterable<dynamic> supported = mixedMedia
-        ? results.where((dynamic item) =>
-            item is Map && (item['media_type'] == 'movie' || item['media_type'] == 'tv'))
+    final Iterable<dynamic> supportedResults = mixedMedia
+        ? results.where(
+            (dynamic item) =>
+                item is Map &&
+                (item['media_type'] == 'movie' || item['media_type'] == 'tv'),
+          )
         : results;
-    final List<MediaItem> items = supported
+    final List<MediaItem> items = supportedResults
         .map((dynamic e) => MediaItem.fromJson(e as Map<String, dynamic>, isTv))
         .where((MediaItem m) => m.id != 0)
         .toList();
     final int currentPage = (data['page'] as num?)?.toInt() ?? page;
     final int totalPages =
-        ((data['total_pages'] as num?)?.toInt() ?? currentPage).clamp(1, 500).toInt();
+        ((data['total_pages'] as num?)?.toInt() ?? currentPage)
+            .clamp(1, 500)
+            .toInt();
     return TmdbPage(items: items, page: currentPage, totalPages: totalPages);
   }
 
   Future<TmdbPage> trending({int page = 1}) =>
       _list('/trending/all/week', false, page: page, mixedMedia: true);
 
-  Future<TmdbPage> popularMovies({int page = 1}) => _list('/movie/popular', false, page: page);
+  Future<TmdbPage> popularMovies({int page = 1}) =>
+      _list('/movie/popular', false, page: page);
 
-  Future<TmdbPage> popularTv({int page = 1}) => _list('/tv/popular', true, page: page);
+  Future<TmdbPage> popularTv({int page = 1}) =>
+      _list('/tv/popular', true, page: page);
+
+  Future<TmdbPage> topRatedMovies({int page = 1}) =>
+      _list('/movie/top_rated', false, page: page);
+
+  Future<TmdbPage> topRatedTv({int page = 1}) =>
+      _list('/tv/top_rated', true, page: page);
 
   Future<TmdbPage> search(String query, bool isTv, {int page = 1}) => _list(
     isTv ? '/search/tv' : '/search/movie',
@@ -87,43 +108,24 @@ class TmdbRepository {
     query: <String, String>{'query': query, 'include_adult': 'false'},
   );
 
-  /// Lancamentos para o banner das abas.
-  Future<TmdbPage> launches({required bool isTv, int page = 1}) async {
-    try {
-      final TmdbPage primary = isTv
-          ? await _list('/tv/on_the_air', true, page: page)
-          : await _list('/movie/now_playing', false, page: page);
-      if (primary.items.isNotEmpty) return primary;
-    } catch (_) {}
-    return isTv ? popularTv(page: page) : popularMovies(page: page);
-  }
-
-  /// Catalogo com os filtros do modal (nota, ano, genero).
+  /// Catalogo com filtros rapidos de genero / nota / ordenacao.
   Future<TmdbPage> discover({
     required bool isTv,
     int page = 1,
     int? genreId,
     double minRating = 0,
     String sort = 'popularity.desc',
-    int yearFrom = 0,
-    int yearTo = 0,
+    int? year,
   }) {
-    final String dateKey = isTv ? 'first_air_date' : 'primary_release_date';
-    final bool singleYear = yearFrom > 0 && yearFrom == yearTo;
-    final bool range = yearFrom > 0 && yearTo > yearFrom;
-
     final Map<String, String> query = <String, String>{
       'sort_by': sort,
       'include_adult': 'false',
       if (genreId != null && genreId > 0) 'with_genres': '$genreId',
       if (minRating > 0) 'vote_average.gte': minRating.toStringAsFixed(1),
       if (minRating > 0) 'vote_count.gte': '60',
-      if (singleYear)
-        (isTv ? 'first_air_date_year' : 'primary_release_year'): '$yearFrom',
-      if (range) '$dateKey.gte': '$yearFrom-01-01',
-      if (range) '$dateKey.lte': '$yearTo-12-31',
+      if (year != null && year > 1900)
+        (isTv ? 'first_air_date_year' : 'primary_release_year'): '$year',
     };
-
     return _list(isTv ? '/discover/tv' : '/discover/movie', isTv, page: page, query: query);
   }
 
@@ -144,10 +146,9 @@ class TmdbRepository {
   Future<Map<String, dynamic>?> movieDetails(int id) async {
     try {
       final Map<String, dynamic> details = await _get('/movie/$id', <String, String>{
-        'append_to_response': 'videos,credits,external_ids,similar',
+        'append_to_response': 'videos,credits,release_dates,similar',
       });
-      details['videos'] =
-          await _videosWithLanguageFallback('/movie/$id/videos', details['videos']);
+      details['videos'] = await _videosWithLanguageFallback('/movie/$id/videos', details['videos']);
       return details;
     } catch (_) {
       return null;
@@ -157,10 +158,9 @@ class TmdbRepository {
   Future<Map<String, dynamic>?> tvDetails(int id) async {
     try {
       final Map<String, dynamic> details = await _get('/tv/$id', <String, String>{
-        'append_to_response': 'videos,credits,external_ids,similar',
+        'append_to_response': 'videos,credits,content_ratings,similar',
       });
-      details['videos'] =
-          await _videosWithLanguageFallback('/tv/$id/videos', details['videos']);
+      details['videos'] = await _videosWithLanguageFallback('/tv/$id/videos', details['videos']);
       return details;
     } catch (_) {
       return null;
@@ -174,11 +174,13 @@ class TmdbRepository {
     bool hasYoutubeTrailer(dynamic value) =>
         value is Map &&
         value['results'] is List &&
-        (value['results'] as List).any((dynamic video) =>
-            video is Map &&
-            video['site'] == 'YouTube' &&
-            video['type'] == 'Trailer' &&
-            (video['key']?.toString().isNotEmpty ?? false));
+        (value['results'] as List).any(
+          (dynamic video) =>
+              video is Map &&
+              video['site'] == 'YouTube' &&
+              video['type'] == 'Trailer' &&
+              (video['key']?.toString().isNotEmpty ?? false),
+        );
 
     if (hasYoutubeTrailer(initial)) return Map<String, dynamic>.from(initial as Map);
 
@@ -198,8 +200,9 @@ class TmdbRepository {
 
   Future<List<Map<String, dynamic>>> similar(int id, bool isTv) async {
     try {
-      final Map<String, dynamic> d =
-          await _get(isTv ? '/tv/$id/similar' : '/movie/$id/similar');
+      final Map<String, dynamic> d = await _get(
+        isTv ? '/tv/$id/similar' : '/movie/$id/similar',
+      );
       return ((d['results'] as List<dynamic>?) ?? const <dynamic>[])
           .map((dynamic e) => e as Map<String, dynamic>)
           .toList();

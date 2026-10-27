@@ -234,8 +234,7 @@ class StreamScanner {
       final String url = rawUrl.trim();
       if (url.isEmpty) return;
 
-      final bool isAd = isAdUrl(url);
-      if (isAd) score -= adPenalty; // <<< coracao do ad-cleaner
+      if (isAdUrl(url)) score -= adPenalty; // <<< coracao do ad-cleaner
 
       Uri abs;
       try {
@@ -265,7 +264,7 @@ class StreamScanner {
       for (final String teaser in teaserHints) {
         if (lower.contains(teaser)) score -= teaserPenalty;
       }
-      if (!isAd) score += languageScore(full);
+      score += languageScore(full);
 
       if (score > (scores[full] ?? -99999)) {
         scores[full] = score;

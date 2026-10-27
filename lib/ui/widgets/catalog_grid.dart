@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../core/focus/dpad.dart';
+import '../../core/theme/app_theme.dart';
 import '../../data/models/media_item.dart';
 import '../../data/repositories/tmdb_repository.dart';
 import '../../services/stream/video_resolver_service.dart';
@@ -9,8 +10,7 @@ import 'poster_card.dart';
 
 typedef CatalogLoader = Future<TmdbPage> Function({required int page});
 
-/// Grade paginada com carregamento infinito e cabecalho rolavel opcional
-/// (banner). Sem nenhuma barra de filtro exposta.
+/// Grade de catalogo paginada, com foco D-Pad e carregamento infinito.
 class CatalogGrid extends StatefulWidget {
   const CatalogGrid({
     super.key,
@@ -18,16 +18,12 @@ class CatalogGrid extends StatefulWidget {
     required this.resolver,
     required this.repository,
     this.progressOf,
-    this.header,
-    this.autofocusFirst = true,
   });
 
   final CatalogLoader loader;
   final VideoResolverService resolver;
   final TmdbRepository repository;
   final double Function(MediaItem item)? progressOf;
-  final Widget? header;
-  final bool autofocusFirst;
 
   @override
   State<CatalogGrid> createState() => _CatalogGridState();
@@ -149,98 +145,62 @@ class _CatalogGridState extends State<CatalogGrid> {
 
   @override
   Widget build(BuildContext context) {
-    final Widget? header = widget.header;
-
     if (_loadingInitial) {
-      return CustomScrollView(
-        controller: _scrollController,
-        slivers: <Widget>[
-          if (header != null) SliverToBoxAdapter(child: header),
-          const SliverFillRemaining(
-            hasScrollBody: false,
-            child: Padding(
-              padding: EdgeInsets.all(40),
-              child: Center(child: CircularProgressIndicator()),
-            ),
-          ),
-        ],
-      );
+      return const Center(child: CircularProgressIndicator());
     }
 
     if (_items.isEmpty) {
-      return CustomScrollView(
-        controller: _scrollController,
-        slivers: <Widget>[
-          if (header != null) SliverToBoxAdapter(child: header),
-          SliverFillRemaining(
-            hasScrollBody: false,
-            child: Padding(
-              padding: const EdgeInsets.all(40),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: <Widget>[
-                  const Icon(Icons.filter_alt_off_rounded, size: 44, color: Colors.white24),
-                  const SizedBox(height: 12),
-                  Text(
-                    _initialLoadFailed
-                        ? 'Falha ao carregar.'
-                        : 'Nada encontrado com esses filtros.',
-                    style: const TextStyle(color: Colors.white54, fontSize: 12),
-                  ),
-                  const SizedBox(height: 14),
-                  TvButton(
-                    label: 'TENTAR DE NOVO',
-                    icon: Icons.refresh,
-                    onPressed: _loadFirstPage,
-                  ),
-                ],
-              ),
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            const Icon(Icons.cloud_off, size: 48, color: AppTheme.gold),
+            const SizedBox(height: 12),
+            Text(
+              _initialLoadFailed ? 'Falha ao carregar o catalogo.' : 'Nada carregado.',
+              style: const TextStyle(color: Colors.white54),
             ),
-          ),
-        ],
+            const SizedBox(height: 12),
+            TvButton(
+              label: 'TENTAR DE NOVO',
+              icon: Icons.refresh,
+              onPressed: _loadFirstPage,
+            ),
+          ],
+        ),
       );
     }
 
-    return CustomScrollView(
+    return GridView.builder(
       controller: _scrollController,
-      slivers: <Widget>[
-        if (header != null) SliverToBoxAdapter(child: header),
-        SliverPadding(
-          padding: const EdgeInsets.fromLTRB(12, 12, 12, 70),
-          sliver: SliverGrid(
-            gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-              maxCrossAxisExtent: 160,
-              childAspectRatio: 0.58,
-              crossAxisSpacing: 10,
-              mainAxisSpacing: 12,
-            ),
-            delegate: SliverChildBuilderDelegate(
-              (BuildContext ctx, int i) => PosterCard(
-                item: _items[i],
-                autofocus: i == 0 && widget.autofocusFirst,
-                progress: widget.progressOf?.call(_items[i]),
-                onTap: () => _open(_items[i]),
+      padding: const EdgeInsets.fromLTRB(14, 14, 14, 60),
+      gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+        maxCrossAxisExtent: 172,
+        childAspectRatio: 0.54,
+        crossAxisSpacing: 12,
+        mainAxisSpacing: 14,
+      ),
+      itemCount: _items.length + (_loadingMore || _loadMoreFailed ? 1 : 0),
+      itemBuilder: (BuildContext ctx, int i) {
+        if (i == _items.length) {
+          if (_loadMoreFailed) {
+            return Center(
+              child: TextButton.icon(
+                onPressed: _loadNextPage,
+                icon: const Icon(Icons.refresh),
+                label: const Text('Tentar carregar mais'),
               ),
-              childCount: _items.length,
-            ),
-          ),
-        ),
-        if (_loadingMore || _loadMoreFailed)
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.only(bottom: 70),
-              child: _loadMoreFailed
-                  ? Center(
-                      child: TextButton.icon(
-                        onPressed: _loadNextPage,
-                        icon: const Icon(Icons.refresh),
-                        label: const Text('Tentar carregar mais'),
-                      ),
-                    )
-                  : const Center(child: CircularProgressIndicator()),
-            ),
-          ),
-      ],
+            );
+          }
+          return const Center(child: CircularProgressIndicator());
+        }
+        return PosterCard(
+          item: _items[i],
+          autofocus: i == 0,
+          progress: widget.progressOf?.call(_items[i]),
+          onTap: () => _open(_items[i]),
+        );
+      },
     );
   }
 }

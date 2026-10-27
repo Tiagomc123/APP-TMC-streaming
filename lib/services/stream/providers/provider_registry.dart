@@ -1,14 +1,17 @@
 import '../json_api_provider.dart';
 import '../json_api_spec.dart';
+import 'pobreflix_provider.dart';
 import 'stream_provider.dart';
 
-/// Registro de fontes. Todas sao APIs JSON: nenhuma depende de pagina HTML
-/// nem de WebView. A ordem base vem da prioridade do spec; o resolver
-/// reordena por saude em runtime.
+/// =============================================================================
+/// Fontes JSON declarativas e PobreFlix. A página de player só é aberta na
+/// WebView quando a fonte não consegue fornecer um manifesto direto.
+/// =============================================================================
 class ProviderRegistry {
   ProviderRegistry._();
 
-  static List<StreamProvider> all() => jsonApiSpecs
-      .map((JsonApiSpec spec) => JsonApiProvider(spec))
-      .toList();
+  static List<StreamProvider> all() => <StreamProvider>[
+    for (final JsonApiSpec spec in jsonApiSpecs) JsonApiProvider(spec),
+    PobreFlixProvider(),
+  ];
 }

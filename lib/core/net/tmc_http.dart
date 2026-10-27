@@ -56,7 +56,9 @@ class TmcHttp {
     bool json = false,
     Map<String, String>? extra,
   }) {
-    final String host = referer == null ? '' : (Uri.tryParse(referer)?.host ?? '');
+    final String host = referer == null
+        ? ''
+        : (Uri.tryParse(referer)?.host ?? '');
     final Map<String, String> jar = _jar[host] ?? const <String, String>{};
 
     return <String, String>{
@@ -82,7 +84,10 @@ class TmcHttp {
   void _storeCookies(Uri uri, Map<String, String> headers) {
     final String? raw = headers['set-cookie'];
     if (raw == null || raw.isEmpty) return;
-    final Map<String, String> jar = _jar.putIfAbsent(uri.host, () => <String, String>{});
+    final Map<String, String> jar = _jar.putIfAbsent(
+      uri.host,
+      () => <String, String>{},
+    );
     for (final String part in raw.split(RegExp(r',(?=\s*[A-Za-z0-9_\-]+=)'))) {
       final String pair = part.split(';').first.trim();
       final int eq = pair.indexOf('=');
@@ -105,7 +110,15 @@ class TmcHttp {
     for (int attempt = 0; attempt <= retries; attempt++) {
       try {
         final http.Response res = await _client
-            .get(uri, headers: browserHeaders(referer: referer, origin: origin, json: json, extra: extra))
+            .get(
+              uri,
+              headers: browserHeaders(
+                referer: referer,
+                origin: origin,
+                json: json,
+                extra: extra,
+              ),
+            )
             .timeout(timeout ?? const Duration(seconds: 18));
 
         _storeCookies(res.request?.url ?? uri, res.headers);
@@ -136,8 +149,16 @@ class TmcHttp {
     String? referer,
     String? origin,
     int retries = 1,
+    Duration? timeout,
   }) async {
-    final HttpResult? r = await getText(url, referer: referer, origin: origin, json: true, retries: retries);
+    final HttpResult? r = await getText(
+      url,
+      referer: referer,
+      origin: origin,
+      json: true,
+      retries: retries,
+      timeout: timeout,
+    );
     if (r == null || !r.ok) return null;
     try {
       final dynamic j = jsonDecode(r.body);
@@ -159,13 +180,16 @@ class TmcHttp {
 
     try {
       final http.Request req = http.Request('GET', uri)
-        ..headers.addAll(browserHeaders(
-          referer: referer,
-          extra: <String, String>{'Range': 'bytes=0-4095', ...?headers},
-        ));
+        ..headers.addAll(
+          browserHeaders(
+            referer: referer,
+            extra: <String, String>{'Range': 'bytes=0-4095', ...?headers},
+          ),
+        );
 
-      final http.StreamedResponse res =
-          await _client.send(req).timeout(timeout ?? AppConfig.probeTimeout);
+      final http.StreamedResponse res = await _client
+          .send(req)
+          .timeout(timeout ?? AppConfig.probeTimeout);
 
       if (res.statusCode != 200 && res.statusCode != 206) {
         return ProbeResult(ok: false, status: res.statusCode);
@@ -181,11 +205,17 @@ class TmcHttp {
       final String ctype = (res.headers['content-type'] ?? '').toLowerCase();
 
       final bool isHls = head.contains('#EXTM3U') || ctype.contains('mpegurl');
-      final bool isMp4 = ctype.contains('video/') ||
+      final bool isMp4 =
+          ctype.contains('video/') ||
           ctype.contains('octet-stream') ||
           uri.path.toLowerCase().endsWith('.mp4');
 
-      return ProbeResult(ok: isHls || isMp4, isHls: isHls, isMp4: isMp4, status: res.statusCode);
+      return ProbeResult(
+        ok: isHls || isMp4,
+        isHls: isHls,
+        isMp4: isMp4,
+        status: res.statusCode,
+      );
     } catch (_) {
       return const ProbeResult(ok: false);
     }

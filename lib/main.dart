@@ -3,7 +3,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:media_kit/media_kit.dart';
 
-import 'core/app_config.dart';
 import 'core/device/tv_detector.dart';
 import 'core/theme/app_theme.dart';
 import 'data/repositories/library_repository.dart';
@@ -16,21 +15,28 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   MediaKit.ensureInitialized(); // libmpv
-  await TvDetector.warmUp(); // UA de TV quando aplicavel
+  await TvDetector.warmUp(); // define UA de TV quando aplicavel
   await LibraryRepository.instance.load();
 
-  // Retrato como base. So o trailer e o player trocam para paisagem.
+  // Retrato como base: o trailer e o player trocam para paisagem sob demanda.
   await SystemChrome.setPreferredOrientations(<DeviceOrientation>[
     DeviceOrientation.portraitUp,
   ]);
 
-  // TV Box tem pouco disco: limpa cache de rede antigo no boot.
+  // Android TV Box tem pouco disco: limpa cache de rede antigo no boot.
   await CacheService.sweep(
-    maxMb: AppConfig.cacheMaxMb,
-    maxAge: AppConfig.cacheMaxAge,
+    maxMb: AppConfigCache.maxMb,
+    maxAge: AppConfigCache.maxAge,
   );
 
   runApp(const TmcApp());
+}
+
+/// Espelho local dos limites (evita import extra em main).
+class AppConfigCache {
+  AppConfigCache._();
+  static const int maxMb = 320;
+  static const Duration maxAge = Duration(days: 7);
 }
 
 class TmcApp extends StatefulWidget {

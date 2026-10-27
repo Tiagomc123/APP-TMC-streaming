@@ -38,7 +38,7 @@ class VidLinkProvider extends StreamProvider {
 
   @override
   Future<ResolvedStream?> resolve(MediaRef ref, ResolverContext ctx) async {
-    for (final String base in ctx.basesFor(id)) {
+    for (final String base in ctx.basesFor(id, AppConfig.vidlinkBases)) {
       final String path = ref.isTv
           ? 'tv/${ref.tmdbId}/${ref.season}/${ref.episode}'
           : 'movie/${ref.tmdbId}';

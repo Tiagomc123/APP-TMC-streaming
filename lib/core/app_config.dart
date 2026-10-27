@@ -1,8 +1,8 @@
 // =============================================================================
-//  TMC - Configuracao central (v3 "pure API")
+//  TMC - Configuracao central
 //
-//  Nenhuma pagina HTML e interpretada pelo usuario: todo provedor entrega
-//  JSON com a URL direta do manifesto (.m3u8 / .mp4).
+//  Tudo que muda entre ambientes (bases de origem, User-Agent, limites de
+//  cache e marcadores de idioma) fica aqui, em um unico lugar tipado.
 // =============================================================================
 import 'package:flutter/foundation.dart';
 
@@ -19,6 +19,8 @@ class AppConfig {
   static const String tmdbImageBase = 'https://image.tmdb.org/t/p';
 
   // ------------------------------ Identidade HTTP ----------------------------
+  // Chrome Android REAL, sem o marcador 'wv'. O 'wv' faz o Cloudflare tratar
+  // como bot e o YouTube devolver erro 153.
   static const String uaMobile =
       'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36';
 
@@ -35,13 +37,9 @@ class AppConfig {
   static const String uaMac =
       'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
-  /// UA usado nas requisicoes de API (rotativo, anti-fingerprint).
+  /// Pool usado na rotacao de identidade entre provedores. Sites de terceiros
+  /// bloqueiam por fingerprint: alternar reduz a chance de tela de verificacao.
   static const List<String> uaPool = <String>[uaMobile, uaSamsung, uaDesktop, uaMac];
-
-  /// UA usado no PLAYER. Mistura Chrome + marcador ExoPlayer, que e o que os
-  /// CDNs de terceiros esperam de um aparelho Android/TV Box.
-  static const String uaPlayer =
-      'Mozilla/5.0 (Linux; Android 11; TMC Player) AppleWebKit/537.36 (KHTML, like Gecko) ExoPlayerLib/2.19.1 TMC/1.0.4';
 
   static const String acceptHtml =
       'text/html,application/xhtml+xml,application/xml;q=0.9,application/json;q=0.8,*/*;q=0.8';
@@ -52,6 +50,8 @@ class AppConfig {
   static bool get isTv => tvMode;
 
   static int _uaIndex = 0;
+
+  /// Trocado para UA de TV no boot quando roda em Android TV.
   static String userAgent = uaMobile;
 
   static void useTvUserAgent() {
@@ -59,6 +59,7 @@ class AppConfig {
     userAgent = uaTv;
   }
 
+  /// Gira o User-Agent. Em TV mantem o UA de TV (sites checam leanback).
   static void rotateUserAgent() {
     if (tvMode) {
       userAgent = uaTv;
@@ -68,61 +69,50 @@ class AppConfig {
     userAgent = uaPool[_uaIndex];
   }
 
-  /// Headers entregues ao player nativo. Referer/Origin sao obrigatorios em
-  /// boa parte dos CDNs (sem eles: 403 e tela preta).
-  static Map<String, String> playerHeaders({String? referer, String? origin}) =>
-      <String, String>{
-        'User-Agent': uaPlayer,
-        'Accept': '*/*',
-        'Accept-Language': acceptLang,
-        if (referer != null && referer.isNotEmpty) 'Referer': referer,
-        if (origin != null && origin.isNotEmpty) 'Origin': origin,
-      };
-
   // --------------------------- Preferencia de audio --------------------------
-  /// Ligado pelo filtro de Idioma. Quando falso, o dublado continua na frente
-  /// mas o legendado perde apenas 1 ponto de prioridade.
-  static bool preferDublado = true;
-
+  /// Marcadores de conteudo dublado / nacional (prioridade absoluta).
   static const List<String> ptBrMarkers = <String>[
     'dublado', 'dublagem', 'dubla', 'pt-br', 'pt_br', 'ptbr', 'portugues',
     'portuguÃªs', 'brasil', 'brazil', 'nacional', 'dual', '_pt_', '/pt/',
   ];
 
+  /// Marcadores de conteudo legendado (usados como desempate).
   static const List<String> legendadoMarkers = <String>[
     'legendado', 'legenda', 'subtitle', '_sub', '/sub/',
   ];
 
+  /// Linguagens aceitas como PT-BR na selecao de faixa de audio do HLS.
   static const List<String> ptBrLanguages = <String>['pt', 'pt-br', 'pt_br', 'por', 'pob'];
 
   // ----------------------------- Bases de origem -----------------------------
+  /// Fallbacks embutidos: o site troca de dominio com frequencia.
+  static const List<String> pobreflixBases = <String>[
+    'https://pobreflixhd.sbs',
+    'https://pobreflixhd.top',
+    'https://pobreflixhd.online',
+    'https://pobreflixhd.tv',
+  ];
+  /// Bases do VidLink (API JSON publica -> HLS direto).
+  static const List<String> vidlinkBases = <String>['https://vidlink.pro','https://vidlink.to'];
+  /// Preferencia de audio: true = dublado (PT-BR) primeiro.
+  static bool preferDublado = true;
+
   static const List<String> superflixBases = <String>[
     'https://superflixapi.fun',
     'https://superflixapi.pro',
-    'https://superflixapi.sbs',
-    'https://superflixapi.top',
-    'https://superflixapi.online',
-    'https://superflixapi.xyz',
   ];
 
-  /// Fallback por id, usado quando o endpoint de fontes do Supabase falha.
-  static const Map<String, List<String>> fallbackBases = <String, List<String>>{
-    'superflix_api': superflixBases,
-    'vidlink': <String>['https://vidlink.pro'],
-    'warezcdn': <String>['https://warezcdn.com', 'https://warezcdn.net'],
-    'pontofinal': <String>['https://pontofinal.org'],
-  };
-
-  static List<String> fallbackFor(String id) => fallbackBases[id] ?? const <String>[];
-
   // --------------------------------- Resolver --------------------------------
-  static const Duration resolveTimeout = Duration(seconds: 26);
-  static const Duration probeTimeout = Duration(seconds: 8);
+  static const Duration resolveTimeout = Duration(seconds: 28);
+  static const Duration probeTimeout = Duration(seconds: 9);
   static const Duration streamCacheTtl = Duration(minutes: 30);
-  static const int maxIframeDepth = 2;
+  static const int maxIframeDepth = 3;
   static const int maxCandidates = 16;
+  static const int maxRedirectHops = 3;
+  static const int maxPagesPerTitle = 14;
 
   // ---------------------------------- Cache ----------------------------------
+  /// Teto de cache de rede do player (Android TV Box costuma ter pouco disco).
   static const int cacheMaxMb = 320;
   static const Duration cacheMaxAge = Duration(days: 7);
 

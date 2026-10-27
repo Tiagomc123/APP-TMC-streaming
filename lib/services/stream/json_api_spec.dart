@@ -60,15 +60,24 @@ const List<JsonApiSpec> jsonApiSpecs = <JsonApiSpec>[
       'https://superflixapi.xyz',
     ],
     moviePaths: <String>['filme/{id}?format=json', 'filme/{imdb}?format=json'],
-    tvPaths: <String>['serie/{id}/{s}/{e}?format=json', 'serie/{imdb}/{s}/{e}?format=json'],
+    tvPaths: <String>[
+      'serie/{id}/{s}/{e}?format=json',
+      'serie/{imdb}/{s}/{e}?format=json',
+    ],
   ),
   JsonApiSpec(
     id: 'vidlink',
     label: 'VidLink',
     priority: 12,
     bases: <String>['https://vidlink.pro'],
-    moviePaths: <String>['api/b/movie/{id}?multiLang=1', 'api/b/movie/{id}?multiLang=0'],
-    tvPaths: <String>['api/b/tv/{id}/{s}/{e}?multiLang=1', 'api/b/tv/{id}/{s}/{e}?multiLang=0'],
+    moviePaths: <String>[
+      'api/b/movie/{id}?multiLang=1',
+      'api/b/movie/{id}?multiLang=0',
+    ],
+    tvPaths: <String>[
+      'api/b/tv/{id}/{s}/{e}?multiLang=1',
+      'api/b/tv/{id}/{s}/{e}?multiLang=0',
+    ],
     mode: JsonApiMode.playlistField,
     followPages: false,
   ),
@@ -78,7 +87,9 @@ const List<JsonApiSpec> jsonApiSpecs = <JsonApiSpec>[
     priority: 18,
     bases: <String>['https://warezcdn.com', 'https://warezcdn.net'],
     moviePaths: <String>['getPlayer.php?id={id}&type=movie'],
-    tvPaths: <String>['getPlayer.php?id={id}&type=serie&season={s}&episode={e}'],
+    tvPaths: <String>[
+      'getPlayer.php?id={id}&type=serie&season={s}&episode={e}',
+    ],
   ),
   JsonApiSpec(
     id: 'pontofinal',
@@ -86,6 +97,23 @@ const List<JsonApiSpec> jsonApiSpecs = <JsonApiSpec>[
     priority: 22,
     bases: <String>['https://pontofinal.org'],
     moviePaths: <String>['api/filme/{id}', 'filme/{id}?format=json'],
-    tvPaths: <String>['api/serie/{id}/{s}/{e}', 'serie/{id}/{s}/{e}?format=json'],
+    tvPaths: <String>[
+      'api/serie/{id}/{s}/{e}',
+      'serie/{id}/{s}/{e}?format=json',
+    ],
+  ),
+  JsonApiSpec(
+    id: 'embedcine',
+    label: 'EmbedCine',
+    priority: 28,
+    bases: <String>[
+      'https://embedcine.com',
+      'https://embedcine.top',
+      'https://embedcine.xyz',
+      'https://embedcine.net',
+      'https://embedcine.tv',
+    ],
+    moviePaths: <String>['filme/{id}', 'movie/{id}'],
+    tvPaths: <String>['serie/{id}/{s}/{e}', 'tv/{id}/{s}/{e}'],
   ),
 ];
