@@ -11,6 +11,10 @@ include: package:flutter_lints/flutter.yaml
 
 analyzer:
   exclude:
+    - lib/legacy/**
+    - .tmc_backup_*/**
+    - _tmc_backup_*/**
+    - lib/tmc_frame_stub/**
     - build/**
     - android/**
     - ios/**

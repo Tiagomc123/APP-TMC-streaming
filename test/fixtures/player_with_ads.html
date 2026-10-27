@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Assistir Filme Teste Online</title>
+<meta property="og:video" content="https://cdn.content.com/hls/998877/master.m3u8">
+<meta property="og:video:type" content="application/x-mpegURL">
+<script src="https://cdn.doubleclick.net/ads.js"></script>
+<script src="https://s.adnxs.com/ttj.js"></script>
+</head>
+<body>
+<div id="player_wrapper"><div id="player"></div></div>
+<div class="ads-slot">
+  <iframe src="https://ads.adnxs.com/ttj?id=1234&amp;cb=1" width="300" height="250" scrolling="no"></iframe>
+</div>
+<script>
+  var adTag = "https://pubads.g.doubleclick.net/gampad/ads?iu=/1234&sz=640x480";
+  var preroll = {file: "https://ads.popads.net/vast/preroll.mp4", type: "mp4"};
+  var config = {
+    file: "https://cdn.content.com/hls/998877/master.m3u8",
+    poster: "https://cdn.content.com/poster.jpg",
+    sources: [
+      {file: "https://cdn.content.com/hls/998877/1080p.m3u8", label: "1080p", type: "hls"},
+      {file: "https://cdn.content.com/hls/998877/720p.m3u8", label: "720p", type: "hls"}
+    ]
+  };
+  jwplayer("player").setup(config);
+</script>
+</body>
+</html>

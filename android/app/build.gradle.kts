@@ -5,6 +5,8 @@ plugins {
 }
 
 android {
+    // media_kit empacota .so por ABI - obrigatorio em release para TV Box
+    packaging { jniLibs { useLegacyPackaging = true } }
     namespace = "com.dmc.mc"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion

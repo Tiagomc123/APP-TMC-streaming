@@ -1,0 +1,7 @@
+project_id = "xjqdiulxrprxegfrufyf"
+
+[functions.tmdb-proxy]
+verify_jwt = false
+
+[functions.tmc-sources]
+verify_jwt = false

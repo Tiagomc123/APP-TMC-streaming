@@ -1,0 +1,6 @@
+{
+  "title": "Filme Teste",
+  "players": [
+    {"name": "Servidor 1", "url": "https://dead.cdn.example/x/master.m3u8", "type": "hls"}
+  ]
+}

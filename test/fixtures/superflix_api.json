@@ -1,0 +1,9 @@
+{
+  "title": "Filme Teste",
+  "players": [
+    {"name": "Servidor 1", "url": "https://cdn.superflix.fun/hls/777/playlist.m3u8", "type": "hls"},
+    {"name": "Servidor 2", "url": "https://embed.superflix.fun/e/abc", "type": "embed"},
+    {"name": "Servidor 3", "url": "https://ads.popads.net/vast/v.mp4", "type": "ad"}
+  ],
+  "backup": "https://cdn.superflix.fun/hls/777/backup.m3u8"
+}

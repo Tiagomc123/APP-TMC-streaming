@@ -1,9 +1,15 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mc/main.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
-  test('Validacao de inicializacao do TMC v3.0 Ultra', () {
-    // Teste simples para dar sinal verde na Central de Build do TMC
-    final int soma = 1 + 1;
-    expect(soma, 2);
+  testWidgets('o app sobe e monta o MaterialApp', (WidgetTester tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+
+    await tester.pumpWidget(const TmcApp());
+    await tester.pump(const Duration(milliseconds: 50));
+
+    expect(find.byType(MaterialApp), findsOneWidget);
   });
 }
