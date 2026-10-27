@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../data/models/media_ref.dart';
 import '../../data/models/resolved_stream.dart';
@@ -25,12 +28,21 @@ class PlayerScreen extends StatefulWidget {
 class _PlayerScreenState extends State<PlayerScreen> {
   final Set<String> _usedProviders = <String>{};
   late ResolvedStream _stream;
+  Duration _lastPosition = Duration.zero;
 
   @override
   void initState() {
     super.initState();
     _stream = widget.stream;
     _usedProviders.add(widget.stream.providerId);
+    unawaited(_enterLandscape());
+  }
+
+  Future<void> _enterLandscape() async {
+    await SystemChrome.setPreferredOrientations(<DeviceOrientation>[
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]);
   }
 
   /// Chamado pelo player quando a fonte morre: pede outra, excluindo as usadas.
@@ -48,6 +60,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   @override
+  void dispose() {
+    unawaited(SystemChrome.setPreferredOrientations(<DeviceOrientation>[
+      DeviceOrientation.portraitUp,
+    ]));
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.black,
@@ -58,9 +78,21 @@ class _PlayerScreenState extends State<PlayerScreen> {
             ? 'T${widget.ref.season} E${widget.ref.episode} - ${_stream.providerLabel}'
             : _stream.providerLabel,
         startAt: ProgressService.startAt(widget.ref),
-        onProgress: (Duration p, Duration d) => ProgressService.save(widget.ref, p, d),
-        onCompleted: () => ProgressService.complete(widget.ref),
+        onProgress: (Duration p, Duration d) {
+          _lastPosition = p;
+          unawaited(ProgressService.save(widget.ref, p, d));
+        },
+        onCompleted: () {
+          unawaited(ProgressService.complete(widget.ref));
+        },
         onNeedFallback: _fallback,
+        onExit: () {
+          unawaited(ProgressService.save(
+            widget.ref,
+            _lastPosition,
+            _lastPosition,
+          ));
+        },
       ),
     );
   }

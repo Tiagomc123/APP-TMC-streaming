@@ -16,7 +16,9 @@ class TvDetector {
   static bool get isTv => _isTv;
 
   static bool fromContext(BuildContext context) {
-    if (MediaQuery.maybeNavigationModeOf(context) == NavigationMode.directional) return true;
+    if (MediaQuery.maybeNavigationModeOf(context) == NavigationMode.directional) {
+      return true;
+    }
     return _isTv;
   }
 
@@ -26,7 +28,7 @@ class TvDetector {
       final AndroidDeviceInfo info = await DeviceInfoPlugin().androidInfo;
       _isTv = info.systemFeatures.contains('android.software.leanback') ||
           !info.systemFeatures.contains('android.hardware.touchscreen');
-      if (_isTv) AppConfig.userAgent = AppConfig.uaTv;
+      if (_isTv) AppConfig.useTvUserAgent();
     } catch (_) {}
   }
 }

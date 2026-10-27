@@ -24,12 +24,13 @@ class StreamCandidate {
 }
 
 /// =============================================================================
-///  AD-CLEANER
+///  AD-CLEANER + PT-BR
 ///  Varre HTML/JSON de pagina de player e devolve APENAS os candidatos limpos,
 ///  ordenados por probabilidade de serem o CONTEUDO (e nao o anuncio).
 ///
 ///  Nada de JS injetado, nada de popup killer: as redes de anuncio sao
 ///  penalizadas no score e simplesmente descartadas antes de chegar ao player.
+///  Conteudo dublado ganha bonus; legendado leva penalidade.
 /// =============================================================================
 class StreamScanner {
   StreamScanner._();
@@ -60,6 +61,11 @@ class StreamScanner {
   /// Palavras que indicam teaser em vez do filme.
   static const List<String> teaserHints = <String>['trailer', 'preview', 'teaser'];
 
+  static const int adPenalty = 120;
+  static const int teaserPenalty = 25;
+  static const int ptBrBonus = 18;
+  static const int legendadoPenalty = 9;
+
   static final RegExp _urlRe = RegExp(
     r'''(?:https?:)?//[^\s"'\\<>\)\]\}]+|/[A-Za-z0-9_\-./]+\.(?:m3u8|mp4|mkv|webm)(?:\?[^\s"'\\<>]*)?''',
   );
@@ -83,8 +89,11 @@ class StreamScanner {
     r"""atob\s*\(\s*['"]([A-Za-z0-9+/=\\]{24,})['"]\s*\)""",
   );
 
-  static const int adPenalty = 120;
-  static const int teaserPenalty = 25;
+  /// Tokens que alguns players exigem na querystring para liberar o arquivo.
+  static final RegExp _tokenRe = RegExp(
+    r'''(?:token|hash|expires|exp|sig|signature|md5|auth|authkey|key)\s*[:=]\s*["']?([A-Za-z0-9_\-\.%]{6,140})''',
+    caseSensitive: false,
+  );
 
   static bool isAdUrl(String url) {
     final String u = url.toLowerCase();
@@ -105,6 +114,25 @@ class StreamScanner {
       return true;
     }
     return false;
+  }
+
+  /// Bonus/penalidade de idioma aplicado ao score de um candidato.
+  static int languageScore(String url) {
+    final String u = url.toLowerCase();
+    int score = 0;
+    for (final String mark in AppConfig.ptBrMarkers) {
+      if (u.contains(mark)) {
+        score += ptBrBonus;
+        break;
+      }
+    }
+    for (final String mark in AppConfig.legendadoMarkers) {
+      if (u.contains(mark)) {
+        score -= legendadoPenalty;
+        break;
+      }
+    }
+    return score;
   }
 
   /// Normaliza escapes de JSON embutido e entidades HTML.
@@ -162,6 +190,31 @@ class StreamScanner {
     return out.toString();
   }
 
+  /// Extrai tokens (token/hash/expires/...) do HTML para reanexar na URL.
+  static Map<String, String> tokens(String html) {
+    final String norm = normalize(html);
+    final Map<String, String> out = <String, String>{};
+    for (final RegExpMatch m in _tokenRe.allMatches(norm)) {
+      final String value = m.group(1)!.trim();
+      if (value.isEmpty) continue;
+      if (value == 'true' || value == 'false' || value == 'null') continue;
+      out.putIfAbsent(m.group(0)!.split(RegExp(r'[:=]')).first.trim().toLowerCase(), () => value);
+    }
+    return out;
+  }
+
+  /// Anexa os tokens encontrados na URL (quando ela ainda nao tem query).
+  static String withTokens(String url, Map<String, String> tokens) {
+    if (tokens.isEmpty) return url;
+    final Uri? uri = Uri.tryParse(url);
+    if (uri == null) return url;
+    final Map<String, String> q = <String, String>{...uri.queryParameters};
+    for (final MapEntry<String, String> e in tokens.entries) {
+      q.putIfAbsent(e.key, () => e.value);
+    }
+    return uri.replace(queryParameters: q).toString();
+  }
+
   /// Ponto de entrada. `base` = URL final da pagina (para resolver relativos).
   static List<StreamCandidate> scan(String html, {required Uri base}) {
     final Map<String, int> scores = <String, int>{};
@@ -181,7 +234,8 @@ class StreamScanner {
       final String url = rawUrl.trim();
       if (url.isEmpty) return;
 
-      if (isAdUrl(url)) score -= adPenalty; // <<< coracao do ad-cleaner
+      final bool isAd = isAdUrl(url);
+      if (isAd) score -= adPenalty; // <<< coracao do ad-cleaner
 
       Uri abs;
       try {
@@ -211,6 +265,7 @@ class StreamScanner {
       for (final String teaser in teaserHints) {
         if (lower.contains(teaser)) score -= teaserPenalty;
       }
+      if (!isAd) score += languageScore(full);
 
       if (score > (scores[full] ?? -99999)) {
         scores[full] = score;

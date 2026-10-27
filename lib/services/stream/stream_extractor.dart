@@ -5,12 +5,22 @@ import '../../data/models/resolved_stream.dart';
 import 'hls_service.dart';
 import 'stream_scanner.dart';
 
-/// Segue paginas, iframes e JSON ate o arquivo de video limpo.
+/// Segue paginas, iframes, JSON e telas de verificacao ate o arquivo limpo.
 class StreamExtractor {
   StreamExtractor(this._http);
   final TmcHttp _http;
 
   String lastError = '';
+
+  static final RegExp _metaRefreshRe = RegExp(
+    r'''http-equiv\s*=\s*["']?refresh["']?[^>]*content\s*=\s*["'][^"']*url\s*=\s*([^"';]+)''',
+    caseSensitive: false,
+  );
+
+  static final RegExp _jsRedirectRe = RegExp(
+    r'''(?:location\.href|location\.replace\s*\(|location\.assign\s*\(|window\.location\s*=|location\s*=)\s*["']([^"']+)["']''',
+    caseSensitive: false,
+  );
 
   Future<ResolvedStream?> resolveFrom(
     Uri page, {
@@ -37,7 +47,7 @@ class StreamExtractor {
       return null;
     }
     if (res.challenged) {
-      lastError = '$providerLabel bloqueou (Cloudflare)';
+      lastError = '$providerLabel bloqueou (verificacao/Cloudflare)';
       return null;
     }
 
@@ -110,8 +120,56 @@ class StreamExtractor {
       if (nested != null) return nested;
     }
 
+    // 3) nada encontrado: a pagina pode ser apenas a tela de verificacao.
+    //    Extrai o alvo do meta-refresh / location.href e repete o fluxo.
+    final Uri? redirect = _verificationTarget(res.body, res.finalUrl);
+    if (redirect != null && redirect.toString() != page.toString()) {
+      final ResolvedStream? hop = await resolveFrom(
+        redirect,
+        providerId: providerId,
+        providerLabel: providerLabel,
+        depth: depth + 1,
+        referer: res.finalUrl.toString(),
+        visited: visited,
+      );
+      if (hop != null) return hop;
+    }
+
     lastError = 'Nenhum stream limpo em $providerLabel';
     return null;
+  }
+
+  /// Detecta tela de "verificando / aguarde" e devolve o alvo do salto.
+  Uri? _verificationTarget(String body, Uri base) {
+    final bool looksInterstitial = body.contains('verific') ||
+        body.contains('Verific') ||
+        body.contains('aguarde') ||
+        body.contains('Aguarde') ||
+        body.contains('checking') ||
+        body.contains('Just a moment') ||
+        body.contains('refresh');
+
+    for (final RegExp re in <RegExp>[_metaRefreshRe, _jsRedirectRe]) {
+      for (final RegExpMatch m in re.allMatches(body)) {
+        final String raw = m.group(1)!.trim();
+        if (raw.isEmpty || raw.startsWith('javascript:')) continue;
+        final Uri? abs = _abs(raw, base);
+        if (abs == null) continue;
+        if (abs.toString() == base.toString()) continue;
+        if (!looksInterstitial && StreamScanner.isAdUrl(abs.toString())) continue;
+        return abs;
+      }
+    }
+    return null;
+  }
+
+  Uri? _abs(String raw, Uri base) {
+    try {
+      final Uri u = base.resolve(raw.trim());
+      return u.hasScheme ? u : null;
+    } catch (_) {
+      return null;
+    }
   }
 
   bool _nonHlsHost(String host) {

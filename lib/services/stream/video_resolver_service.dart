@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/app_config.dart';
 import '../../core/net/tmc_http.dart';
+import '../../data/models/hls_models.dart';
 import '../../data/models/media_ref.dart';
 import '../../data/models/resolved_stream.dart';
 import '../../data/repositories/external_sources_repository.dart';
@@ -47,9 +48,12 @@ class _Health {
 ///   - cache em memoria (TTL) + dedupe de chamadas concorrentes;
 ///   - corrida escalonada entre provedores: o 1o que responder vence e os
 ///     seguintes ja estao aquecidos para servir de fallback imediato;
+///   - rotacao de User-Agent a cada fonte testada (anti-fingerprint);
+///   - audio PT-BR promovido para a primeira posicao quando o HLS oferece
+///     varias faixas;
 ///   - ordenacao dinamica por saude do provedor (persistida);
 ///   - `exclude` para o player pedir "outra fonte" quando o stream morre;
-///   - stream de [ResolverStatus] para a UI mostrar "testando fonte 2 de 4".
+///   - stream de [ResolverStatus] para a UI mostrar "testando fonte 2 de 5".
 /// =============================================================================
 class VideoResolverService {
   VideoResolverService({
@@ -157,13 +161,34 @@ class VideoResolverService {
 
     if (winner != null) {
       _health.putIfAbsent(winner.providerId, () => _Health()).ok++;
-    } else {
-      for (final StreamProvider p in pool) {
-        _health.putIfAbsent(p.id, () => _Health()).fail++;
-      }
+      unawaited(_persistHealth());
+      return _preferPtBrAudio(winner);
+    }
+
+    for (final StreamProvider p in pool) {
+      _health.putIfAbsent(p.id, () => _Health()).fail++;
     }
     unawaited(_persistHealth());
-    return winner;
+    return null;
+  }
+
+  /// Se o HLS expoe varias faixas de audio, o PT-BR vai para a primeira
+  /// posicao (o player escolhe a primeira quando ninguem selecionou nada).
+  ResolvedStream _preferPtBrAudio(ResolvedStream stream) {
+    if (stream.audioTracks.length < 2) return stream;
+    final List<HlsAudioTrack> ordered = List<HlsAudioTrack>.of(stream.audioTracks)
+      ..sort((HlsAudioTrack a, HlsAudioTrack b) => _ptScore(b).compareTo(_ptScore(a)));
+    return stream.reorderAudio(ordered);
+  }
+
+  int _ptScore(HlsAudioTrack track) {
+    final String s = '${track.lang} ${track.name}'.toLowerCase();
+    for (final String lang in AppConfig.ptBrLanguages) {
+      if (s.contains(lang)) return 3;
+    }
+    if (s.contains('portugu') || s.contains('dubla')) return 3;
+    if (s.contains('en')) return 1;
+    return 2;
   }
 
   List<StreamProvider> _ordered({
@@ -185,7 +210,8 @@ class VideoResolverService {
   }
 
   /// Corrida escalonada: a fonte 1 sai na hora, a 2 em 1.2 s, a 3 em 2.4 s...
-  /// Se a 1 travar, a 2 ja esta a caminho.
+  /// Se a 1 travar, a 2 ja esta a caminho. Antes de cada fonte o User-Agent
+  /// gira, o que derruba boa parte das telas de verificacao.
   Future<ResolvedStream?> _staggeredRace(
     List<StreamProvider> pool,
     MediaRef ref,
@@ -208,6 +234,7 @@ class VideoResolverService {
             attempt: i + 1,
             total: pool.length,
           );
+          AppConfig.rotateUserAgent();
 
           try {
             final ResolvedStream? s = await provider.resolve(ref, ctx);

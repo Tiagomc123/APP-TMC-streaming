@@ -1,3 +1,4 @@
+import '../../../core/app_config.dart';
 import '../../../core/net/tmc_http.dart';
 import '../../../data/models/media_ref.dart';
 import '../../../data/models/resolved_stream.dart';
@@ -28,6 +29,21 @@ class ResolverContext {
 
   List<String> sourceBases(String id) => sources[id] ?? const <String>[];
 
+  /// Bases editaveis (Supabase) primeiro; depois os fallbacks embutidos.
+  /// Assim o app continua reproduzindo mesmo se o dominio trocar.
+  List<String> basesFor(String id, List<String> fallback) {
+    final List<String> all = <String>[
+      ...sourceBases(id),
+      ...fallback,
+    ].map(_trim).where((String u) => u.startsWith('http')).toList();
+    return all.toSet().toList();
+  }
+
+  static String _trim(String url) {
+    final String t = url.trim();
+    return t.endsWith('/') ? t.substring(0, t.length - 1) : t;
+  }
+
   void emit(String msg, {String? providerId, int attempt = 0, int total = 0}) =>
       _emit(msg, providerId: providerId, attempt: attempt, total: total);
 
@@ -49,14 +65,17 @@ class ResolverContext {
         referer: referer,
       );
 
-  /// Testa candidatos diretos vindos de API JSON.
+  /// Testa candidatos diretos vindos de API JSON, PT-BR primeiro.
   Future<ResolvedStream?> fromDirectCandidates(
     List<String> urls, {
     required String providerId,
     required String providerLabel,
     String? referer,
   }) async {
-    for (final String url in urls) {
+    final List<String> ordered = List<String>.of(urls)
+      ..sort((String a, String b) => ptBrRank(a).compareTo(ptBrRank(b)));
+
+    for (final String url in ordered) {
       final ProbeResult probe = await http.probe(url, referer: referer);
       if (!probe.ok) continue;
 
@@ -66,11 +85,32 @@ class ResolverContext {
         providerId: providerId,
         providerLabel: providerLabel,
         headers: <String, String>{
-          'User-Agent': 'Mozilla/5.0',
+          'User-Agent': AppConfig.userAgent,
           'Referer': ?referer,
         },
       );
     }
     return null;
+  }
+
+  /// Menor valor = melhor. Prioriza dublado/PT-BR e penaliza legendado.
+  int ptBrRank(String url) {
+    final String u = url.toLowerCase();
+    int rank = 0;
+    for (final String mark in AppConfig.ptBrMarkers) {
+      if (u.contains(mark)) {
+        rank -= 6;
+        break;
+      }
+    }
+    for (final String mark in AppConfig.legendadoMarkers) {
+      if (u.contains(mark)) {
+        rank += 3;
+        break;
+      }
+    }
+    if (u.contains('.m3u8')) rank -= 2;
+    if (u.contains('1080')) rank -= 1;
+    return rank;
   }
 }

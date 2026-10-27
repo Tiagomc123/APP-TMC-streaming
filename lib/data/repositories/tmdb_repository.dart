@@ -95,12 +95,53 @@ class TmdbRepository {
   Future<TmdbPage> popularTv({int page = 1}) =>
       _list('/tv/popular', true, page: page);
 
+  Future<TmdbPage> topRatedMovies({int page = 1}) =>
+      _list('/movie/top_rated', false, page: page);
+
+  Future<TmdbPage> topRatedTv({int page = 1}) =>
+      _list('/tv/top_rated', true, page: page);
+
   Future<TmdbPage> search(String query, bool isTv, {int page = 1}) => _list(
     isTv ? '/search/tv' : '/search/movie',
     isTv,
     page: page,
     query: <String, String>{'query': query, 'include_adult': 'false'},
   );
+
+  /// Catalogo com filtros rapidos de genero / nota / ordenacao.
+  Future<TmdbPage> discover({
+    required bool isTv,
+    int page = 1,
+    int? genreId,
+    double minRating = 0,
+    String sort = 'popularity.desc',
+    int? year,
+  }) {
+    final Map<String, String> query = <String, String>{
+      'sort_by': sort,
+      'include_adult': 'false',
+      if (genreId != null && genreId > 0) 'with_genres': '$genreId',
+      if (minRating > 0) 'vote_average.gte': minRating.toStringAsFixed(1),
+      if (minRating > 0) 'vote_count.gte': '60',
+      if (year != null && year > 1900)
+        (isTv ? 'first_air_date_year' : 'primary_release_year'): '$year',
+    };
+    return _list(isTv ? '/discover/tv' : '/discover/movie', isTv, page: page, query: query);
+  }
+
+  Future<List<Map<String, dynamic>>> genres(bool isTv) async {
+    try {
+      final Map<String, dynamic> data =
+          await _get(isTv ? '/genre/tv/list' : '/genre/movie/list');
+      return ((data['genres'] as List<dynamic>?) ?? const <dynamic>[])
+          .whereType<Map<dynamic, dynamic>>()
+          .map((Map<dynamic, dynamic> m) => m.cast<String, dynamic>())
+          .where((Map<String, dynamic> m) => (m['name'] ?? '').toString().isNotEmpty)
+          .toList();
+    } catch (_) {
+      return <Map<String, dynamic>>[];
+    }
+  }
 
   Future<Map<String, dynamic>?> movieDetails(int id) async {
     try {

@@ -7,16 +7,19 @@ import 'package:youtube_player_iframe/youtube_player_iframe.dart';
 import '../../core/focus/dpad.dart';
 
 /// =============================================================================
-///  TRAILER EMBUTIDO
+///  TRAILER EMBUTIDO + CONTROLE DE ROTACAO
 ///
 ///  100% dentro da pagina de detalhes. Sem url_launcher, sem abrir o app do
 ///  YouTube, sem WebView "nudge".
 ///
+///  O botao "GIRAR TELA" forca o app para paisagem por meio de
+///  `SystemChrome.setPreferredOrientations`, ignorando a rotacao automatica
+///  do aparelho, e devolve o retrato quando o trailer e fechado.
+///
 ///  A leitura do player e feita de forma TOLERANTE A VERSAO do pacote:
 ///   - `autoPlay` e `startSeconds` vao no factory (nao em YoutubePlayerParams);
 ///   - o estado vem do `stream` de YoutubePlayerValue, lido por campo;
-///   - play/pause/mute/unMute/close sao chamados por despacho dinamico, o que
-///     funciona tanto se forem metodos quanto getters assincronos.
+///   - play/pause/mute/unMute/close sao chamados por despacho dinamico.
 /// =============================================================================
 class EmbeddedTrailer extends StatefulWidget {
   const EmbeddedTrailer({
@@ -40,6 +43,7 @@ class _EmbeddedTrailerState extends State<EmbeddedTrailer> {
   YoutubePlayerController? _ctl;
   bool _playing = false;
   bool _muted = false;
+  bool _rotated = false;
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
   StreamSubscription<YoutubePlayerValue>? _subscription;
@@ -106,7 +110,36 @@ class _EmbeddedTrailerState extends State<EmbeddedTrailer> {
   void dispose() {
     _subscription?.cancel();
     _ctl?.close();
+    if (_rotated) {
+      unawaited(_forcePortrait());
+    }
     super.dispose();
+  }
+
+  // ------------------------------ rotacao de tela ----------------------------
+  Future<void> _forceLandscape() async {
+    await SystemChrome.setPreferredOrientations(<DeviceOrientation>[
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]);
+    await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+  }
+
+  Future<void> _forcePortrait() async {
+    await SystemChrome.setPreferredOrientations(<DeviceOrientation>[
+      DeviceOrientation.portraitUp,
+    ]);
+    await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+  }
+
+  Future<void> _toggleRotation() async {
+    final bool next = !_rotated;
+    if (next) {
+      await _forceLandscape();
+    } else {
+      await _forcePortrait();
+    }
+    if (mounted) setState(() => _rotated = next);
   }
 
   void _toggle() {
@@ -157,7 +190,7 @@ class _EmbeddedTrailerState extends State<EmbeddedTrailer> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
         ClipRRect(
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(14),
           child: YoutubePlayerControllerProvider(
             controller: ctl,
             child: YoutubePlayer(controller: ctl, aspectRatio: 16 / 9),
@@ -174,6 +207,11 @@ class _EmbeddedTrailerState extends State<EmbeddedTrailer> {
               icon: _playing ? Icons.pause : Icons.play_arrow,
               primary: true,
               onPressed: _toggle,
+            ),
+            TvButton(
+              label: 'GIRAR TELA',
+              icon: _rotated ? Icons.stay_current_portrait : Icons.screen_rotation,
+              onPressed: () => unawaited(_toggleRotation()),
             ),
             TvButton(
               label: _muted ? 'SOM ON' : 'MUDO',
@@ -206,6 +244,7 @@ class _EmbeddedTrailerState extends State<EmbeddedTrailer> {
 }
 
 /// Tela cheia reaproveitando o mesmo video, retomando de onde parou.
+/// Entra e sai do modo paisagem sozinha.
 class _FullscreenTrailer extends StatefulWidget {
   const _FullscreenTrailer({
     required this.videoKey,
@@ -241,13 +280,24 @@ class _FullscreenTrailerState extends State<_FullscreenTrailer> {
         privacyEnhancedMode: true,
       ),
     );
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    unawaited(_enterLandscape());
+  }
+
+  Future<void> _enterLandscape() async {
+    await SystemChrome.setPreferredOrientations(<DeviceOrientation>[
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]);
+    await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
   }
 
   @override
   void dispose() {
     _ctl.close();
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    unawaited(SystemChrome.setPreferredOrientations(<DeviceOrientation>[
+      DeviceOrientation.portraitUp,
+    ]));
+    unawaited(SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge));
     super.dispose();
   }
 
