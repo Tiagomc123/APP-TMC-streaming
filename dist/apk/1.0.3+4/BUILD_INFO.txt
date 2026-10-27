@@ -1,4 +1,0 @@
-﻿Version: 1.0.3+4
-Source commit: ae47d17dc1aaf0b52df1960861776130c61680cb
-Built: 2026-10-27
-Command: flutter build apk --split-per-abi

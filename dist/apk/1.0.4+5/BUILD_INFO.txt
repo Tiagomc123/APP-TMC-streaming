@@ -1,0 +1,7 @@
+﻿Projeto: TMC
+Pacote Flutter: mc
+Versao: 1.0.4+5
+Data: 2026-10-27
+Branch: main
+Commit: 0e11b8db334c9b7b356d7b84644fb1e9db290c07
+Build: flutter build apk --split-per-abi

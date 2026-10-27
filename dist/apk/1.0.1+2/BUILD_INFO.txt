@@ -1,7 +1,0 @@
-Projeto: TMC
-Pacote Flutter: mc
-Versao: 1.0.1+2
-Data: 2026-10-27
-Branch: main
-Commit fonte: e7c663c
-Build Android: release split por ABI
