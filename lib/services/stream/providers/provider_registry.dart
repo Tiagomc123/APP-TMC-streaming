@@ -1,23 +1,14 @@
-import 'embedcine_provider.dart';
-import 'pobreflix_provider.dart';
-import 'pontofinal_provider.dart';
+import '../json_api_provider.dart';
+import '../json_api_spec.dart';
 import 'stream_provider.dart';
-import 'superflix_provider.dart';
-import 'vidlink_provider.dart';
-import 'warezcdn_provider.dart';
 
+/// Registro de fontes. Todas sao APIs JSON: nenhuma depende de pagina HTML
+/// nem de WebView. A ordem base vem da prioridade do spec; o resolver
+/// reordena por saude em runtime.
 class ProviderRegistry {
   ProviderRegistry._();
 
-  /// Ordem base. O resolver reordena por saude em runtime.
-  /// SuperFlix (API JSON) primeiro; PobreFlix em seguida; os scrapers de
-  /// HTML ficam por ultimo por serem mais sensiveis a mudanca de layout.
-  static List<StreamProvider> all() => <StreamProvider>[
-        SuperFlixApiProvider(),
-        PobreFlixProvider(),
-        VidLinkProvider(),
-        WarezCdnProvider(),
-        EmbedCineProvider(),
-        PontoFinalProvider(),
-      ];
+  static List<StreamProvider> all() => jsonApiSpecs
+      .map((JsonApiSpec spec) => JsonApiProvider(spec))
+      .toList();
 }

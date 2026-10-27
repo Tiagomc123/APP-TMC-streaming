@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 
 import '../../core/focus/dpad.dart';
-import '../../core/theme/app_theme.dart';
 import '../../data/models/media_item.dart';
 import '../../data/repositories/tmdb_repository.dart';
 import '../../services/stream/video_resolver_service.dart';
@@ -10,8 +9,8 @@ import 'poster_card.dart';
 
 typedef CatalogLoader = Future<TmdbPage> Function({required int page});
 
-/// Grade de catalogo paginada, com foco D-Pad, carregamento infinito e
-/// cabecalho rolavel (banner de destaques + filtros).
+/// Grade paginada com carregamento infinito e cabecalho rolavel opcional
+/// (banner). Sem nenhuma barra de filtro exposta.
 class CatalogGrid extends StatefulWidget {
   const CatalogGrid({
     super.key,
@@ -180,15 +179,15 @@ class _CatalogGridState extends State<CatalogGrid> {
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: <Widget>[
-                  const Icon(Icons.cloud_off, size: 48, color: AppTheme.gold),
+                  const Icon(Icons.filter_alt_off_rounded, size: 44, color: Colors.white24),
                   const SizedBox(height: 12),
                   Text(
                     _initialLoadFailed
-                        ? 'Falha ao carregar o catalogo.'
-                        : 'Nada carregado.',
-                    style: const TextStyle(color: Colors.white54),
+                        ? 'Falha ao carregar.'
+                        : 'Nada encontrado com esses filtros.',
+                    style: const TextStyle(color: Colors.white54, fontSize: 12),
                   ),
-                  const SizedBox(height: 12),
+                  const SizedBox(height: 14),
                   TvButton(
                     label: 'TENTAR DE NOVO',
                     icon: Icons.refresh,
@@ -207,13 +206,13 @@ class _CatalogGridState extends State<CatalogGrid> {
       slivers: <Widget>[
         if (header != null) SliverToBoxAdapter(child: header),
         SliverPadding(
-          padding: const EdgeInsets.fromLTRB(14, 14, 14, 60),
+          padding: const EdgeInsets.fromLTRB(12, 12, 12, 70),
           sliver: SliverGrid(
             gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-              maxCrossAxisExtent: 172,
-              childAspectRatio: 0.54,
-              crossAxisSpacing: 12,
-              mainAxisSpacing: 14,
+              maxCrossAxisExtent: 160,
+              childAspectRatio: 0.58,
+              crossAxisSpacing: 10,
+              mainAxisSpacing: 12,
             ),
             delegate: SliverChildBuilderDelegate(
               (BuildContext ctx, int i) => PosterCard(
@@ -229,7 +228,7 @@ class _CatalogGridState extends State<CatalogGrid> {
         if (_loadingMore || _loadMoreFailed)
           SliverToBoxAdapter(
             child: Padding(
-              padding: const EdgeInsets.only(bottom: 60),
+              padding: const EdgeInsets.only(bottom: 70),
               child: _loadMoreFailed
                   ? Center(
                       child: TextButton.icon(

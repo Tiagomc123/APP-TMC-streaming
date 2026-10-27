@@ -3,9 +3,9 @@ import '../../../core/net/tmc_http.dart';
 import '../../../data/models/media_ref.dart';
 import '../../../data/models/resolved_stream.dart';
 import '../stream_extractor.dart';
+import '../url_sanitizer.dart';
 
-/// Contrato de uma fonte. Cada provider monta as URLs dela e delega a
-/// varredura ao [ResolverContext].
+/// Contrato de uma fonte.
 abstract class StreamProvider {
   String get id;
   String get label;
@@ -29,10 +29,8 @@ class ResolverContext {
 
   List<String> sourceBases(String id) => sources[id] ?? const <String>[];
 
-  /// Bases editaveis (Supabase) primeiro; depois os fallbacks embutidos.
-  /// Assim o app continua reproduzindo mesmo se o dominio trocar.
-  /// Sem isso, uma falha no endpoint de fontes zerava a lista e TODOS os
-  /// provedores devolviam null imediatamente.
+  /// Bases editaveis (Supabase) primeiro; depois o fallback embutido.
+  /// Sem isso, uma falha no endpoint de fontes zerava a lista.
   List<String> basesFor(String id, [List<String> fallback = const <String>[]]) {
     final List<String> hard = fallback.isEmpty ? AppConfig.fallbackFor(id) : fallback;
     final List<String> all = <String>[
@@ -52,7 +50,7 @@ class ResolverContext {
 
   late final StreamExtractor extractor = StreamExtractor(http);
 
-  /// Segue uma pagina de embed ate o stream limpo.
+  /// Segue uma pagina de player ate o stream limpo (salto unico de fallback).
   Future<ResolvedStream?> follow(
     Uri page, {
     required String providerId,
@@ -68,15 +66,27 @@ class ResolverContext {
         referer: referer,
       );
 
-  /// Testa candidatos diretos vindos de API JSON, PT-BR primeiro.
+  /// Testa os candidatos diretos, PT-BR primeiro, e devolve o primeiro vivo.
   Future<ResolvedStream?> fromDirectCandidates(
     List<String> urls, {
     required String providerId,
     required String providerLabel,
     String? referer,
   }) async {
-    final List<String> ordered = List<String>.of(urls)
-      ..sort((String a, String b) => ptBrRank(a).compareTo(ptBrRank(b)));
+    final Set<String> seen = <String>{};
+    final List<String> ordered = <String>[];
+
+    for (final String raw in urls) {
+      final String? clean = UrlSanitizer.extractMedia(raw);
+      if (clean == null) continue;
+      if (seen.add(clean)) ordered.add(clean);
+    }
+
+    ordered.sort((String a, String b) =>
+        UrlSanitizer.mediaScore(b).compareTo(UrlSanitizer.mediaScore(a)));
+
+    final String? origin =
+        referer == null ? null : (Uri.tryParse(referer)?.origin ?? referer);
 
     for (final String url in ordered) {
       final ProbeResult probe = await http.probe(url, referer: referer);
@@ -87,16 +97,13 @@ class ResolverContext {
         kind: probe.isHls ? StreamKind.hls : StreamKind.mp4,
         providerId: providerId,
         providerLabel: providerLabel,
-        headers: <String, String>{
-          'User-Agent': AppConfig.userAgent,
-          'Referer': ?referer,
-        },
+        headers: AppConfig.playerHeaders(referer: referer, origin: origin),
       );
     }
     return null;
   }
 
-  /// Menor valor = melhor. Prioriza dublado/PT-BR e penaliza legendado.
+  /// Menor valor = melhor. Usado como desempate final.
   int ptBrRank(String url) {
     final String u = url.toLowerCase();
     int rank = 0;
@@ -108,12 +115,11 @@ class ResolverContext {
     }
     for (final String mark in AppConfig.legendadoMarkers) {
       if (u.contains(mark)) {
-        rank += 3;
+        rank += AppConfig.preferDublado ? 4 : 1;
         break;
       }
     }
     if (u.contains('.m3u8')) rank -= 2;
-    if (u.contains('1080')) rank -= 1;
     return rank;
   }
 }

@@ -49,4 +49,6 @@ app.*.map.json
 
 # backups do refactor TMC
 _tmc_backup_*/
+*.bak*
+.tmc_removidos_*/
 

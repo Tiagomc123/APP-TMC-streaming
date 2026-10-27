@@ -13,7 +13,7 @@ import '../widgets/continue_watching_row.dart';
 import '../widgets/favorites_grid.dart';
 import 'history_screen.dart';
 
-/// Painel "TMC App" (ultima aba): atalhos, saude das fontes, manutencao.
+/// Painel "TMC App": atalhos, saude das fontes e manutencao.
 class TmcAppScreen extends StatefulWidget {
   const TmcAppScreen({
     super.key,
@@ -67,7 +67,7 @@ class _TmcAppScreenState extends State<TmcAppScreen> {
         _health(),
         const SectionTitle(text: 'MINHA LISTA'),
         Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 14),
+          padding: const EdgeInsets.symmetric(horizontal: 12),
           child: FavoritesGrid(
             resolver: widget.resolver,
             repository: widget.repository,
@@ -84,54 +84,33 @@ class _TmcAppScreenState extends State<TmcAppScreen> {
 
   Widget _shortcuts() {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 18, 16, 0),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+      child: Wrap(
+        spacing: 10,
+        runSpacing: 10,
         children: <Widget>[
-          const Text(
-            'ATALHOS',
-            style: TextStyle(
-              color: Colors.white70,
-              fontSize: 13,
-              letterSpacing: 2,
-              fontWeight: FontWeight.w800,
-            ),
+          TvButton(label: 'HISTORICO', icon: Icons.history_rounded, onPressed: _openHistory),
+          TvButton(
+            label: _sweeping
+                ? 'LIMPANDO...'
+                : (_freedMb > 0 ? 'LIBERADO: ${_freedMb}MB' : 'LIMPAR CACHE'),
+            icon: Icons.cleaning_services_rounded,
+            onPressed: () => unawaited(_sweep()),
           ),
-          const SizedBox(height: 12),
-          Wrap(
-            spacing: 10,
-            runSpacing: 10,
-            children: <Widget>[
-              TvButton(
-                label: 'HISTORICO',
-                icon: Icons.history,
-                onPressed: _openHistory,
-              ),
-              TvButton(
-                label: _sweeping
-                    ? 'LIMPANDO CACHE...'
-                    : (_freedMb > 0
-                          ? 'CACHE LIBERADO: ${_freedMb}MB'
-                          : 'LIMPAR CACHE'),
-                icon: Icons.cleaning_services,
-                onPressed: () => unawaited(_sweep()),
-              ),
-              TvButton(
-                label: 'INICIO',
-                icon: Icons.home_rounded,
-                onPressed: () => widget.onGoToTab?.call(0),
-              ),
-              TvButton(
-                label: 'FILMES',
-                icon: Icons.movie_rounded,
-                onPressed: () => widget.onGoToTab?.call(1),
-              ),
-              TvButton(
-                label: 'SERIES',
-                icon: Icons.tv_rounded,
-                onPressed: () => widget.onGoToTab?.call(2),
-              ),
-            ],
+          TvButton(
+            label: 'INICIO',
+            icon: Icons.home_rounded,
+            onPressed: () => widget.onGoToTab?.call(0),
+          ),
+          TvButton(
+            label: 'FILMES',
+            icon: Icons.movie_rounded,
+            onPressed: () => widget.onGoToTab?.call(1),
+          ),
+          TvButton(
+            label: 'SERIES',
+            icon: Icons.tv_rounded,
+            onPressed: () => widget.onGoToTab?.call(2),
           ),
         ],
       ),
@@ -143,7 +122,7 @@ class _TmcAppScreenState extends State<TmcAppScreen> {
     final List<StreamProvider> providers = widget.resolver.providers;
 
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 22, 16, 0),
+      padding: const EdgeInsets.fromLTRB(16, 20, 16, 0),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
@@ -151,10 +130,10 @@ class _TmcAppScreenState extends State<TmcAppScreen> {
             children: <Widget>[
               const Expanded(
                 child: Text(
-                  'SAUDE DAS FONTES',
+                  'FONTES (API JSON)',
                   style: TextStyle(
-                    color: Colors.white70,
-                    fontSize: 13,
+                    color: Colors.white54,
+                    fontSize: 11,
                     letterSpacing: 2,
                     fontWeight: FontWeight.w800,
                   ),
@@ -171,15 +150,7 @@ class _TmcAppScreenState extends State<TmcAppScreen> {
             ],
           ),
           const SizedBox(height: 12),
-          for (final StreamProvider p in providers)
-            _healthRow(p, scores[p.id] ?? 0.5),
-          const SizedBox(height: 12),
-          const Text(
-            'Ordem de tentativa: SuperFlix API, PobreFlix, WarezCDN, EmbedCine, '
-            'PontoFinal. Prioridade de audio PT-BR (dublado). Se a extracao falhar, '
-            'o app abre a pagina do site no navegador interno automaticamente.',
-            style: TextStyle(color: Colors.white38, fontSize: 11, height: 1.45),
-          ),
+          for (final StreamProvider p in providers) _healthRow(p, scores[p.id] ?? 0.5),
         ],
       ),
     );
@@ -192,7 +163,7 @@ class _TmcAppScreenState extends State<TmcAppScreen> {
       child: Row(
         children: <Widget>[
           SizedBox(
-            width: 96,
+            width: 92,
             child: Text(
               provider.label,
               maxLines: 1,

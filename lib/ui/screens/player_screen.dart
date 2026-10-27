@@ -3,19 +3,14 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import '../../core/app_config.dart';
 import '../../data/models/media_ref.dart';
 import '../../data/models/resolved_stream.dart';
 import '../../services/progress_service.dart';
+import '../../services/stream/url_sanitizer.dart';
 import '../../services/stream/video_resolver_service.dart';
 import '../widgets/custom_video_player.dart';
-import 'web_player_screen.dart';
 
-/// Decide em runtime entre player nativo (media_kit) e navegador interno.
-///
-/// REGRA CENTRAL: se o stream nao for arquivo (.m3u8/.mp4), o libmpv NAO
-/// consegue abrir (era a causa da tela preta sem erro). Nesse caso vai para
-/// a WebView, que toca a pagina normalmente.
+/// Player 100% nativo. Recebe sempre um manifesto .m3u8/.mp4 sanitizado.
 class PlayerScreen extends StatefulWidget {
   const PlayerScreen({
     super.key,
@@ -35,18 +30,21 @@ class PlayerScreen extends StatefulWidget {
 class _PlayerScreenState extends State<PlayerScreen> {
   final Set<String> _usedProviders = <String>{};
   late ResolvedStream _stream;
-  late bool _webMode;
-  String _webUrl = '';
   Duration _lastPosition = Duration.zero;
 
   @override
   void initState() {
     super.initState();
-    _stream = widget.stream;
+    _stream = _sanitize(widget.stream);
     _usedProviders.add(widget.stream.providerId);
-    _webMode = !_stream.playable;
-    _webUrl = _stream.playable ? '' : _stream.url.toString();
     unawaited(_landscape());
+  }
+
+  /// Garante que nada de anuncio/rastreador chegue ao player.
+  ResolvedStream _sanitize(ResolvedStream stream) {
+    final String? clean = UrlSanitizer.extractMedia(stream.url.toString());
+    if (clean == null || clean == stream.url.toString()) return stream;
+    return stream.copyWith(url: Uri.parse(clean));
   }
 
   Future<void> _landscape() async {
@@ -72,44 +70,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
     );
     if (alt != null) {
       _usedProviders.add(alt.providerId);
-      if (mounted) {
-        setState(() {
-          _stream = alt;
-          _webMode = !alt.playable;
-          _webUrl = alt.playable ? '' : alt.url.toString();
-        });
-      }
+      if (mounted) setState(() => _stream = _sanitize(alt));
     }
     return alt;
   }
 
-  /// O navegador capturou um .m3u8/.mp4 real: troca para o player nativo.
-  void _useNative(String url) {
-    setState(() {
-      _stream = ResolvedStream(
-        url: Uri.parse(url),
-        kind: url.contains('.m3u8') ? StreamKind.hls : StreamKind.mp4,
-        providerId: 'web',
-        providerLabel: 'Navegador',
-        headers: <String, String>{
-          'User-Agent': AppConfig.userAgent,
-          if (_webUrl.isNotEmpty) 'Referer': _webUrl,
-        },
-      );
-      _webMode = false;
-    });
-  }
-
   @override
   Widget build(BuildContext context) {
-    if (_webMode) {
-      return WebPlayerScreen(
-        url: Uri.parse(_webUrl),
-        title: widget.ref.display,
-        onUseNative: _useNative,
-      );
-    }
-
     return Scaffold(
       backgroundColor: Colors.black,
       body: CustomVideoPlayer(
