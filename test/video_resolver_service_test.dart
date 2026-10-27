@@ -7,6 +7,7 @@ import 'package:mc/core/net/tmc_http.dart';
 import 'package:mc/data/models/media_ref.dart';
 import 'package:mc/data/models/resolved_stream.dart';
 import 'package:mc/services/stream/video_resolver_service.dart';
+import 'package:mc/services/stream/providers/vidlink_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 String fixture(String name) => File('test/fixtures/$name').readAsStringSync();
@@ -152,5 +153,24 @@ void main() {
     expect(r!.providerId, 'embedcine');
 
     resolver.dispose();
+  });
+
+  test('fallback do VidLink monta rota de filme e episódio', () {
+    expect(
+      VidLinkProvider.pageFor(ref).toString(),
+      'https://vidlink.pro/movie/550?autoplay=true',
+    );
+    expect(
+      VidLinkProvider.pageFor(
+        const MediaRef(
+          tmdbId: 1399,
+          isTv: true,
+          title: 'Série Teste',
+          season: 2,
+          episode: 3,
+        ),
+      ).toString(),
+      'https://vidlink.pro/tv/1399/2/3?autoplay=true',
+    );
   });
 }

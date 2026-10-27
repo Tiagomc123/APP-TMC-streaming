@@ -9,9 +9,9 @@ import '../../data/models/hls_models.dart';
 import '../../data/models/media_ref.dart';
 import '../../data/models/resolved_stream.dart';
 import '../../data/repositories/external_sources_repository.dart';
-import 'providers/pobreflix_provider.dart';
 import 'providers/provider_registry.dart';
 import 'providers/stream_provider.dart';
+import 'providers/vidlink_provider.dart';
 
 class ResolverStatus {
   const ResolverStatus({
@@ -286,10 +286,7 @@ class VideoResolverService {
     ).timeout(directTimeout, onTimeout: () => null);
     if (direct != null) return direct;
 
-    final Uri page = PobreFlixProvider.pageFor(
-      ref,
-      AppConfig.pobreflixBases.first,
-    );
+    final Uri page = VidLinkProvider.pageFor(ref);
     _emit('Abrindo navegador interno...');
     return ResolvedStream(
       url: page,

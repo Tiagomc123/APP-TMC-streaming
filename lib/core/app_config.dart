@@ -120,6 +120,7 @@ class AppConfig {
     'embedcine': <String>['https://embedcine.com', 'https://embedcine.top', 'https://embedcine.xyz'],
     'warezcdn': <String>['https://warezcdn.com', 'https://warezcdn.net', 'https://warezcdn.tv'],
     'pontofinal': <String>['https://pontofinal.org'],
+    'vidlink': <String>['https://vidlink.pro'],
   };
 
   static List<String> fallbackFor(String id) =>

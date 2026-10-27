@@ -3,6 +3,7 @@ import 'pobreflix_provider.dart';
 import 'pontofinal_provider.dart';
 import 'stream_provider.dart';
 import 'superflix_provider.dart';
+import 'vidlink_provider.dart';
 import 'warezcdn_provider.dart';
 
 class ProviderRegistry {
@@ -14,6 +15,7 @@ class ProviderRegistry {
   static List<StreamProvider> all() => <StreamProvider>[
         SuperFlixApiProvider(),
         PobreFlixProvider(),
+        VidLinkProvider(),
         WarezCdnProvider(),
         EmbedCineProvider(),
         PontoFinalProvider(),
