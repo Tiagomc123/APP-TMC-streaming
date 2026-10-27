@@ -85,6 +85,16 @@ class TmdbRepository {
             .toInt();
     return TmdbPage(items: items, page: currentPage, totalPages: totalPages);
   }
+  /// Destaques de lancamento usados nos banners das abas Filmes/Series.
+  Future<TmdbPage> launches({required bool isTv, int page = 1}) async {
+    try {
+      final TmdbPage primary = isTv
+          ? await _list('/tv/on_the_air', true, page: page)
+          : await _list('/movie/now_playing', false, page: page);
+      if (primary.items.isNotEmpty) return primary;
+    } catch (_) {}
+    return isTv ? popularTv(page: page) : popularMovies(page: page);
+  }
 
   Future<TmdbPage> trending({int page = 1}) =>
       _list('/trending/all/week', false, page: page, mixedMedia: true);

@@ -1,7 +1,7 @@
 name: mc
 description: "TMC - agregador de streaming (Android / Android TV)."
 publish_to: 'none'
-version: 1.0.1+2
+version: 1.0.2+3
 
 environment:
   sdk: ^3.13.2

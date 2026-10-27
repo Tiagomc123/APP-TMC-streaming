@@ -112,5 +112,18 @@ class AppConfig {
   static const int cacheMaxMb = 320;
   static const Duration cacheMaxAge = Duration(days: 7);
 
+  /// Domains de emergencia por provedor. Se o endpoint de fontes do Supabase
+  /// falhar, cada provedor ainda tem para onde apontar.
+  static const Map<String, List<String>> fallbackBases = <String, List<String>>{
+    'pobreflix': pobreflixBases,
+    'superflix_api': superflixBases,
+    'embedcine': <String>['https://embedcine.com', 'https://embedcine.top', 'https://embedcine.xyz'],
+    'warezcdn': <String>['https://warezcdn.com', 'https://warezcdn.net', 'https://warezcdn.tv'],
+    'pontofinal': <String>['https://pontofinal.org'],
+  };
+
+  static List<String> fallbackFor(String id) =>
+      fallbackBases[id] ?? const <String>[];
+
   static bool get isWeb => kIsWeb;
 }

@@ -15,7 +15,7 @@ class SuperFlixApiProvider extends StreamProvider {
 
   @override
   Future<ResolvedStream?> resolve(MediaRef ref, ResolverContext ctx) async {
-    for (final String base in ctx.sourceBases(id)) {
+    for (final String base in ctx.basesFor(id)) {
       final String path = ref.isTv
           ? 'serie/${ref.tmdbId}/${ref.season}/${ref.episode}'
           : 'filme/${ref.tmdbId}';

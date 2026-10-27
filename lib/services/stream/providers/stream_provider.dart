@@ -31,10 +31,13 @@ class ResolverContext {
 
   /// Bases editaveis (Supabase) primeiro; depois os fallbacks embutidos.
   /// Assim o app continua reproduzindo mesmo se o dominio trocar.
-  List<String> basesFor(String id, List<String> fallback) {
+  /// Sem isso, uma falha no endpoint de fontes zerava a lista e TODOS os
+  /// provedores devolviam null imediatamente.
+  List<String> basesFor(String id, [List<String> fallback = const <String>[]]) {
+    final List<String> hard = fallback.isEmpty ? AppConfig.fallbackFor(id) : fallback;
     final List<String> all = <String>[
       ...sourceBases(id),
-      ...fallback,
+      ...hard,
     ].map(_trim).where((String u) => u.startsWith('http')).toList();
     return all.toSet().toList();
   }

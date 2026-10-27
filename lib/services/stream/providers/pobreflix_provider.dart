@@ -49,6 +49,34 @@ class PobreFlixProvider extends StreamProvider {
     r'''(?:location\.href|location\.replace\s*\(|location\.assign\s*\(|window\.location\s*=|location\s*=)\s*["']([^"']+)["']''',
     caseSensitive: false,
   );
+  /// Primeiro padrao (dublado) para um titulo. Usado pelo modo web e pelo
+  /// botao "abrir no navegador interno".
+  static Uri pageFor(MediaRef ref, String base) {
+    final String root = base.endsWith('/') ? base.substring(0, base.length - 1) : base;
+    return Uri.parse('$root${patternsFor(ref).first}');
+  }
+
+  static List<String> patternsFor(MediaRef ref) {
+    final String slug = Slug.of(ref.title);
+    final int id = ref.tmdbId;
+    if (ref.isTv) {
+      return <String>[
+        '/series/online/$slug-dublado-${ref.season}x${ref.episode}-$id',
+        '/series/online/$slug-$id',
+        '/series/online/$slug-dublado-$id',
+        '/series/$id',
+        '/serie/$id',
+      ];
+    }
+    return <String>[
+      '/filmes/online/$slug-dublado-$id',
+      '/filmes/online/$slug-$id',
+      '/filmes/online/$slug-legendado-$id',
+      '/filmes/online/$slug',
+      '/filmes/$id',
+      '/filme/$id',
+    ];
+  }
 
   @override
   Future<ResolvedStream?> resolve(MediaRef ref, ResolverContext ctx) async {

@@ -4,17 +4,16 @@ import 'package:flutter/material.dart';
 
 import '../../core/app_config.dart';
 import '../../core/focus/dpad.dart';
-import '../../data/models/media_item.dart';
+import '../../core/theme/app_theme.dart';
 import '../../data/repositories/tmdb_repository.dart';
 import '../../services/cache_service.dart';
+import '../../services/stream/providers/stream_provider.dart';
 import '../../services/stream/video_resolver_service.dart';
 import '../widgets/continue_watching_row.dart';
 import '../widgets/favorites_grid.dart';
-import '../widgets/hero_carousel.dart';
-import 'details_screen.dart';
 import 'history_screen.dart';
 
-/// Painel inicial "TMC App": destaques, retomada, atalhos e manutencao.
+/// Painel "TMC App" (ultima aba): atalhos, saude das fontes, manutencao.
 class TmcAppScreen extends StatefulWidget {
   const TmcAppScreen({
     super.key,
@@ -32,41 +31,8 @@ class TmcAppScreen extends StatefulWidget {
 }
 
 class _TmcAppScreenState extends State<TmcAppScreen> {
-  List<MediaItem> _featured = <MediaItem>[];
-  bool _loading = true;
   bool _sweeping = false;
   int _freedMb = 0;
-
-  @override
-  void initState() {
-    super.initState();
-    _load();
-  }
-
-  Future<void> _load() async {
-    try {
-      final TmdbPage page = await widget.repository.trending();
-      if (!mounted) return;
-      setState(() {
-        _featured = page.items;
-        _loading = false;
-      });
-    } catch (_) {
-      if (mounted) setState(() => _loading = false);
-    }
-  }
-
-  void _open(MediaItem item) {
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => DetailsScreen(
-          item: item,
-          resolver: widget.resolver,
-          repository: widget.repository,
-        ),
-      ),
-    );
-  }
 
   void _openHistory() {
     Navigator.of(context).push(
@@ -97,23 +63,20 @@ class _TmcAppScreenState extends State<TmcAppScreen> {
     return ListView(
       padding: const EdgeInsets.only(bottom: 40),
       children: <Widget>[
-        if (_loading)
-          const SizedBox(height: 300, child: Center(child: CircularProgressIndicator()))
-        else if (_featured.isNotEmpty)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(10, 12, 10, 0),
-            child: HeroCarousel(items: _featured, onOpen: _open),
+        _shortcuts(),
+        _health(),
+        const SectionTitle(text: 'MINHA LISTA'),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14),
+          child: FavoritesGrid(
+            resolver: widget.resolver,
+            repository: widget.repository,
+            shrinkWrap: true,
           ),
+        ),
         ContinueWatchingRow(
           resolver: widget.resolver,
           repository: widget.repository,
-        ),
-        _shortcuts(),
-        const SectionTitle(text: 'MINHA LISTA'),
-        FavoritesGrid(
-          resolver: widget.resolver,
-          repository: widget.repository,
-          shrinkWrap: true,
         ),
       ],
     );
@@ -121,7 +84,7 @@ class _TmcAppScreenState extends State<TmcAppScreen> {
 
   Widget _shortcuts() {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 20, 16, 0),
+      padding: const EdgeInsets.fromLTRB(16, 18, 16, 0),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
@@ -147,31 +110,118 @@ class _TmcAppScreenState extends State<TmcAppScreen> {
               TvButton(
                 label: _sweeping
                     ? 'LIMPANDO CACHE...'
-                    : (_freedMb > 0 ? 'CACHE LIBERADO: ${_freedMb}MB' : 'LIMPAR CACHE'),
+                    : (_freedMb > 0
+                          ? 'CACHE LIBERADO: ${_freedMb}MB'
+                          : 'LIMPAR CACHE'),
                 icon: Icons.cleaning_services,
                 onPressed: () => unawaited(_sweep()),
               ),
               TvButton(
+                label: 'INICIO',
+                icon: Icons.home_rounded,
+                onPressed: () => widget.onGoToTab?.call(0),
+              ),
+              TvButton(
                 label: 'FILMES',
                 icon: Icons.movie_rounded,
-                onPressed: () => widget.onGoToTab?.call(2),
+                onPressed: () => widget.onGoToTab?.call(1),
               ),
               TvButton(
                 label: 'SERIES',
                 icon: Icons.tv_rounded,
-                onPressed: () => widget.onGoToTab?.call(3),
+                onPressed: () => widget.onGoToTab?.call(2),
               ),
             ],
           ),
-          const SizedBox(height: 14),
+        ],
+      ),
+    );
+  }
+
+  Widget _health() {
+    final Map<String, double> scores = widget.resolver.healthScores();
+    final List<StreamProvider> providers = widget.resolver.providers;
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 22, 16, 0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              const Expanded(
+                child: Text(
+                  'SAUDE DAS FONTES',
+                  style: TextStyle(
+                    color: Colors.white70,
+                    fontSize: 13,
+                    letterSpacing: 2,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+              TvButton(
+                label: 'ZERAR',
+                icon: Icons.restart_alt,
+                onPressed: () {
+                  widget.resolver.resetHealth();
+                  setState(() {});
+                },
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          for (final StreamProvider p in providers)
+            _healthRow(p, scores[p.id] ?? 0.5),
+          const SizedBox(height: 12),
           const Text(
-            'Fontes: SuperFlix API, PobreFlix, WarezCDN, EmbedCine, PontoFinal. '
-            'Extracao por HTTP com prioridade de audio PT-BR (dublado).',
-            style: TextStyle(color: Colors.white38, fontSize: 11, height: 1.4),
+            'Ordem de tentativa: SuperFlix API, PobreFlix, WarezCDN, EmbedCine, '
+            'PontoFinal. Prioridade de audio PT-BR (dublado). Se a extracao falhar, '
+            'o app abre a pagina do site no navegador interno automaticamente.',
+            style: TextStyle(color: Colors.white38, fontSize: 11, height: 1.45),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _healthRow(StreamProvider provider, double score) {
+    final double value = score.clamp(0.0, 1.0).toDouble();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        children: <Widget>[
+          SizedBox(
+            width: 96,
+            child: Text(
+              provider.label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: Colors.white70, fontSize: 12),
+            ),
+          ),
+          Expanded(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(3),
+              child: LinearProgressIndicator(
+                value: value,
+                minHeight: 5,
+                backgroundColor: Colors.white12,
+                valueColor: AlwaysStoppedAnimation<Color>(
+                  value >= 0.6
+                      ? AppTheme.green
+                      : (value >= 0.35 ? AppTheme.gold : AppTheme.red),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            '${(value * 100).round()}%',
+            style: const TextStyle(color: Colors.white38, fontSize: 11),
           ),
         ],
       ),
     );
   }
 }
-

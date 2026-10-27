@@ -1,11 +1,14 @@
 import 'package:flutter/material.dart';
 
 import '../../core/theme/app_theme.dart';
+import '../../data/models/media_item.dart';
 import '../../data/repositories/tmdb_repository.dart';
 import '../../services/stream/video_resolver_service.dart';
 import '../widgets/catalog_grid.dart';
+import '../widgets/hero_carousel.dart';
+import 'details_screen.dart';
 
-/// Aba de Filmes / Series com filtro rapido por genero, nota e ordenacao.
+/// Aba de Filmes / Series: banner de lancamentos + filtros + grade.
 class CatalogScreen extends StatefulWidget {
   const CatalogScreen({
     super.key,
@@ -26,6 +29,7 @@ class _CatalogScreenState extends State<CatalogScreen> {
   static const List<double> _ratings = <double>[0, 6, 7, 8, 9];
 
   List<Map<String, dynamic>> _genres = const <Map<String, dynamic>>[];
+  List<MediaItem> _launches = <MediaItem>[];
   int _genreId = 0;
   double _minRating = 0;
   int _sortIndex = 0;
@@ -50,6 +54,7 @@ class _CatalogScreenState extends State<CatalogScreen> {
   void initState() {
     super.initState();
     _loadGenres();
+    _loadLaunches();
   }
 
   Future<void> _loadGenres() async {
@@ -58,38 +63,71 @@ class _CatalogScreenState extends State<CatalogScreen> {
     setState(() => _genres = genres);
   }
 
+  Future<void> _loadLaunches() async {
+    try {
+      final TmdbPage page = await widget.repository.launches(isTv: widget.isTv);
+      if (!mounted) return;
+      setState(() => _launches = page.items.take(8).toList());
+    } catch (_) {}
+  }
+
+  void _open(MediaItem item) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => DetailsScreen(
+          item: item,
+          resolver: widget.resolver,
+          repository: widget.repository,
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: <Widget>[
-        _genreRow(),
-        _ratingRow(),
-        _sortRow(),
-        const Divider(height: 1),
-        Expanded(
-          child: CatalogGrid(
-            key: ValueKey<String>(_signature),
-            resolver: widget.resolver,
-            repository: widget.repository,
-            loader: ({required int page}) => widget.repository.discover(
-              isTv: widget.isTv,
-              page: page,
-              genreId: _genreId == 0 ? null : _genreId,
-              minRating: _minRating,
-              sort: _sorts[_sortIndex]['id'] ?? 'popularity.desc',
+    final bool hasBanner = _launches.isNotEmpty;
+
+    return CatalogGrid(
+      key: ValueKey<String>(_signature),
+      resolver: widget.resolver,
+      repository: widget.repository,
+      autofocusFirst: !hasBanner,
+      loader: ({required int page}) => widget.repository.discover(
+        isTv: widget.isTv,
+        page: page,
+        genreId: _genreId == 0 ? null : _genreId,
+        minRating: _minRating,
+        sort: _sorts[_sortIndex]['id'] ?? 'popularity.desc',
+      ),
+      header: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          if (hasBanner)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(10, 12, 10, 4),
+              child: HeroCarousel(
+                items: _launches,
+                label: 'LANCAMENTOS',
+                height: 216,
+                compact: true,
+                onOpen: _open,
+              ),
             ),
-          ),
-        ),
-      ],
+          _genreRow(),
+          _ratingRow(),
+          _sortRow(),
+          const Divider(height: 1),
+        ],
+      ),
     );
   }
 
   Widget _genreRow() {
     return SizedBox(
-      height: 48,
+      height: 46,
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.fromLTRB(14, 10, 14, 0),
+        padding: const EdgeInsets.fromLTRB(14, 8, 14, 0),
         itemCount: _genres.length + 1,
         separatorBuilder: (_, _) => const SizedBox(width: 8),
         itemBuilder: (BuildContext ctx, int i) {
@@ -114,10 +152,10 @@ class _CatalogScreenState extends State<CatalogScreen> {
 
   Widget _ratingRow() {
     return SizedBox(
-      height: 46,
+      height: 44,
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.fromLTRB(14, 10, 14, 0),
+        padding: const EdgeInsets.fromLTRB(14, 8, 14, 0),
         itemCount: _ratings.length,
         separatorBuilder: (_, _) => const SizedBox(width: 8),
         itemBuilder: (BuildContext ctx, int i) {
@@ -134,10 +172,10 @@ class _CatalogScreenState extends State<CatalogScreen> {
 
   Widget _sortRow() {
     return SizedBox(
-      height: 46,
+      height: 44,
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+        padding: const EdgeInsets.fromLTRB(14, 8, 14, 8),
         itemCount: _sorts.length,
         separatorBuilder: (_, _) => const SizedBox(width: 8),
         itemBuilder: (BuildContext ctx, int i) => _chip(

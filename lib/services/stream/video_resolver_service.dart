@@ -9,6 +9,7 @@ import '../../data/models/hls_models.dart';
 import '../../data/models/media_ref.dart';
 import '../../data/models/resolved_stream.dart';
 import '../../data/repositories/external_sources_repository.dart';
+import 'providers/pobreflix_provider.dart';
 import 'providers/provider_registry.dart';
 import 'providers/stream_provider.dart';
 
@@ -59,7 +60,7 @@ class VideoResolverService {
   VideoResolverService({
     TmcHttp? http,
     List<StreamProvider>? providers,
-    this.stagger = const Duration(milliseconds: 1200),
+    this.stagger = const Duration(milliseconds: 300),
   }) : _http = http ?? TmcHttp(),
        _providers = providers ?? ProviderRegistry.all() {
     _loadHealth();
@@ -140,8 +141,9 @@ class VideoResolverService {
     String? providerId,
     Set<String> exclude = const <String>{},
   }) async {
-    final Map<String, List<String>> sources =
-        await ExternalSourcesRepository.instance.load();
+    final Map<String, List<String>> sources = await ExternalSourcesRepository
+        .instance
+        .load();
     final List<StreamProvider> pool = _ordered(
       providerId: providerId,
       exclude: exclude,
@@ -176,8 +178,11 @@ class VideoResolverService {
   /// posicao (o player escolhe a primeira quando ninguem selecionou nada).
   ResolvedStream _preferPtBrAudio(ResolvedStream stream) {
     if (stream.audioTracks.length < 2) return stream;
-    final List<HlsAudioTrack> ordered = List<HlsAudioTrack>.of(stream.audioTracks)
-      ..sort((HlsAudioTrack a, HlsAudioTrack b) => _ptScore(b).compareTo(_ptScore(a)));
+    final List<HlsAudioTrack> ordered =
+        List<HlsAudioTrack>.of(stream.audioTracks)..sort(
+          (HlsAudioTrack a, HlsAudioTrack b) =>
+              _ptScore(b).compareTo(_ptScore(a)),
+        );
     return stream.reorderAudio(ordered);
   }
 
@@ -261,6 +266,50 @@ class VideoResolverService {
       AppConfig.resolveTimeout,
       onTimeout: () => null,
     );
+  }
+
+  /// Igual a [resolve], mas NUNCA devolve null: se a extracao falhar, devolve
+  /// um stream de tipo `embed` apontando para a pagina do site, que o player
+  /// abre no navegador interno (modo web).
+  Future<ResolvedStream?> resolveOrWeb(
+    MediaRef ref, {
+    String? providerId,
+    bool force = false,
+    Set<String> exclude = const <String>{},
+    Duration directTimeout = const Duration(seconds: 8),
+  }) async {
+    final ResolvedStream? direct = await resolve(
+      ref,
+      providerId: providerId,
+      force: force,
+      exclude: exclude,
+    ).timeout(directTimeout, onTimeout: () => null);
+    if (direct != null) return direct;
+
+    final Uri page = PobreFlixProvider.pageFor(
+      ref,
+      AppConfig.pobreflixBases.first,
+    );
+    _emit('Abrindo navegador interno...');
+    return ResolvedStream(
+      url: page,
+      kind: StreamKind.embed,
+      providerId: 'web',
+      providerLabel: 'Navegador',
+      headers: const <String, String>{},
+      embedPage: page,
+    );
+  }
+
+  /// Saude atual por provedor (0..1) para o painel do app.
+  Map<String, double> healthScores() => <String, double>{
+    for (final StreamProvider p in _providers)
+      p.id: _health[p.id]?.score ?? 0.5,
+  };
+
+  void resetHealth() {
+    _health.clear();
+    unawaited(_persistHealth());
   }
 
   /// Pre-aquece a resolucao em background (chamar ao abrir a tela de detalhes).

@@ -15,7 +15,7 @@ class PontoFinalProvider extends StreamProvider {
 
   @override
   Future<ResolvedStream?> resolve(MediaRef ref, ResolverContext ctx) async {
-    for (final String base in ctx.sourceBases(id)) {
+    for (final String base in ctx.basesFor(id)) {
       final Uri page = Uri.parse(ref.isTv
           ? '$base/serie/${ref.tmdbId}/${ref.season}/${ref.episode}'
           : '$base/filme/${ref.tmdbId}');

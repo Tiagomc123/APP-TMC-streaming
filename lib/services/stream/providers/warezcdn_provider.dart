@@ -18,7 +18,7 @@ class WarezCdnProvider extends StreamProvider {
 
   @override
   Future<ResolvedStream?> resolve(MediaRef ref, ResolverContext ctx) async {
-    for (final String base in ctx.sourceBases(id)) {
+    for (final String base in ctx.basesFor(id)) {
       final ResolvedStream? stream = await _resolveFromBase(ref, ctx, base);
       if (stream != null) return stream;
     }
