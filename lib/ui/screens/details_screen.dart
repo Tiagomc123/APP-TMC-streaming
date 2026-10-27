@@ -7,12 +7,13 @@ import '../../core/focus/dpad.dart';
 import '../../core/theme/app_theme.dart';
 import '../../data/models/media_item.dart';
 import '../../data/models/media_ref.dart';
+import '../../data/models/resolved_stream.dart';
 import '../../data/repositories/library_repository.dart';
 import '../../data/repositories/tmdb_repository.dart';
+import '../../services/progress_service.dart';
 import '../../services/stream/video_resolver_service.dart';
 import '../widgets/embedded_trailer.dart';
 import 'player_screen.dart';
-import '../../data/models/resolved_stream.dart';
 
 class DetailsScreen extends StatefulWidget {
   const DetailsScreen({
@@ -40,11 +41,13 @@ class _DetailsScreenState extends State<DetailsScreen> {
   int _episode = 1;
   String? _trailerKey;
   bool _trailerOpen = false;
+  Duration _resume = Duration.zero;
 
   @override
   void initState() {
     super.initState();
     _fav = LibraryRepository.instance.isFavorite(widget.item.key);
+    _refreshResume();
     _load();
   }
 
@@ -55,7 +58,12 @@ class _DetailsScreenState extends State<DetailsScreen> {
     season: _season,
     episode: _episode,
     year: widget.item.year,
+    poster: widget.item.poster,
   );
+
+  void _refreshResume() {
+    _resume = LibraryRepository.instance.positionOf(_ref.key);
+  }
 
   Future<void> _load() async {
     final Map<String, dynamic>? d = widget.item.isTv
@@ -79,7 +87,8 @@ class _DetailsScreenState extends State<DetailsScreen> {
     widget.resolver.prefetch(_ref);
   }
 
-  /// Seleciona somente trailers hospedados no YouTube e retornados pelo TMDB.
+  /// Seleciona somente trailers hospedados no YouTube e retornados pelo TMDB,
+  /// priorizando audio PT-BR.
   String? _pickTrailer(Map<String, dynamic>? d) {
     final dynamic videosNode = d?['videos'];
     final List<dynamic> videos = videosNode is Map
@@ -103,7 +112,7 @@ class _DetailsScreenState extends State<DetailsScreen> {
       int score(Map<String, dynamic> value) {
         final String language = value['iso_639_1']?.toString() ?? '';
         return (value['official'] == true ? 4 : 0) +
-            (language == 'pt' ? 2 : 0) +
+            (language == 'pt' ? 3 : 0) +
             (language == 'en' ? 1 : 0);
       }
       return score(b).compareTo(score(a));
@@ -118,45 +127,45 @@ class _DetailsScreenState extends State<DetailsScreen> {
 
     if (resolved == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Nenhuma fonte respondeu. Tente novamente.'),
-        ),
+        const SnackBar(content: Text('Nenhuma fonte respondeu. Tente novamente.')),
       );
       return;
     }
 
+    await LibraryRepository.instance.addHistory(ref, _resume, Duration.zero);
+    if (!mounted) return;
+
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) =>
-            PlayerScreen(stream: resolved, ref: ref, resolver: widget.resolver),
+        builder: (_) => PlayerScreen(stream: resolved, ref: ref, resolver: widget.resolver),
       ),
     );
+
+    if (mounted) setState(_refreshResume);
   }
 
   @override
   Widget build(BuildContext context) {
     if (_loading) {
       return const Scaffold(
-        backgroundColor: Colors.black,
+        backgroundColor: AppTheme.bg,
         body: Center(child: CircularProgressIndicator()),
       );
     }
 
-    final String backdrop = (_details?['backdrop_path'] ?? widget.item.backdrop)
+    final String backdrop =
+        (_details?['backdrop_path'] ?? widget.item.backdrop).toString();
+    final String overview =
+        (_details?['overview'] ?? widget.item.overview).toString().trim();
+    final String date = (_details?['release_date'] ??
+            _details?['first_air_date'] ??
+            widget.item.date)
         .toString();
-    final String overview = (_details?['overview'] ?? widget.item.overview)
-        .toString()
-        .trim();
-    final String date =
-        (_details?['release_date'] ??
-                _details?['first_air_date'] ??
-                widget.item.date)
-            .toString();
     final double rating =
         ((_details?['vote_average'] ?? widget.item.rating) as num).toDouble();
 
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: AppTheme.bg,
       body: FocusTraversalGroup(
         policy: ReadingOrderTraversalPolicy(),
         child: CustomScrollView(
@@ -164,7 +173,7 @@ class _DetailsScreenState extends State<DetailsScreen> {
             SliverAppBar(
               expandedHeight: TvDetector.isTv ? 340 : 260,
               pinned: true,
-              backgroundColor: Colors.black,
+              backgroundColor: AppTheme.bg,
               flexibleSpace: FlexibleSpaceBar(
                 background: Stack(
                   fit: StackFit.expand,
@@ -173,8 +182,7 @@ class _DetailsScreenState extends State<DetailsScreen> {
                       CachedNetworkImage(
                         imageUrl: '${AppConfig.tmdbImageBase}/w1280$backdrop',
                         fit: BoxFit.cover,
-                        errorWidget: (_, _, _) =>
-                            Container(color: AppTheme.surface),
+                        errorWidget: (_, _, _) => Container(color: AppTheme.surface),
                       )
                     else
                       Container(color: AppTheme.surface),
@@ -183,7 +191,7 @@ class _DetailsScreenState extends State<DetailsScreen> {
                         gradient: LinearGradient(
                           begin: Alignment.topCenter,
                           end: Alignment.bottomCenter,
-                          colors: <Color>[Colors.transparent, Colors.black],
+                          colors: <Color>[Colors.transparent, AppTheme.bg],
                         ),
                       ),
                     ),
@@ -209,17 +217,11 @@ class _DetailsScreenState extends State<DetailsScreen> {
                     Row(
                       children: <Widget>[
                         if (date.length >= 4)
-                          Text(
-                            date.substring(0, 4),
-                            style: const TextStyle(color: Colors.white54),
-                          ),
+                          Text(date.substring(0, 4), style: const TextStyle(color: Colors.white54)),
                         const SizedBox(width: 12),
-                        const Icon(Icons.star, color: AppTheme.gold, size: 16),
+                        const Icon(Icons.star_rounded, color: AppTheme.gold, size: 17),
                         const SizedBox(width: 4),
-                        Text(
-                          rating.toStringAsFixed(1),
-                          style: const TextStyle(color: Colors.white70),
-                        ),
+                        Text(rating.toStringAsFixed(1), style: const TextStyle(color: Colors.white70)),
                         const SizedBox(width: 12),
                         if (widget.item.isTv)
                           Text(
@@ -234,7 +236,9 @@ class _DetailsScreenState extends State<DetailsScreen> {
                       runSpacing: 12,
                       children: <Widget>[
                         TvButton(
-                          label: 'ASSISTIR',
+                          label: _resume.inSeconds > 5
+                              ? ProgressService.resumeLabel(_resume)
+                              : 'ASSISTIR',
                           icon: Icons.play_arrow,
                           primary: true,
                           autofocus: true,
@@ -243,24 +247,17 @@ class _DetailsScreenState extends State<DetailsScreen> {
                         if (_trailerKey != null)
                           TvButton(
                             label: _trailerOpen ? 'FECHAR TRAILER' : 'TRAILER',
-                            icon: _trailerOpen
-                                ? Icons.close
-                                : Icons.movie_outlined,
-                            onPressed: () =>
-                                setState(() => _trailerOpen = !_trailerOpen),
+                            icon: _trailerOpen ? Icons.close : Icons.movie_outlined,
+                            onPressed: () => setState(() => _trailerOpen = !_trailerOpen),
                           ),
                         TvButton(
                           label: _fav ? 'NA LISTA' : 'MINHA LISTA',
                           icon: _fav ? Icons.favorite : Icons.favorite_border,
                           onPressed: () async {
-                            await LibraryRepository.instance.toggleFavorite(
-                              widget.item,
-                            );
+                            await LibraryRepository.instance.toggleFavorite(widget.item);
                             if (!mounted) return;
-                            setState(
-                              () => _fav = LibraryRepository.instance
-                                  .isFavorite(widget.item.key),
-                            );
+                            setState(() =>
+                                _fav = LibraryRepository.instance.isFavorite(widget.item.key));
                           },
                         ),
                       ],
@@ -269,11 +266,7 @@ class _DetailsScreenState extends State<DetailsScreen> {
                       const SizedBox(height: 18),
                       const Text(
                         'TRAILER OFICIAL',
-                        style: TextStyle(
-                          color: Colors.white54,
-                          fontSize: 12,
-                          letterSpacing: 2,
-                        ),
+                        style: TextStyle(color: Colors.white54, fontSize: 12, letterSpacing: 2),
                       ),
                       const SizedBox(height: 10),
                       EmbeddedTrailer(
@@ -286,19 +279,12 @@ class _DetailsScreenState extends State<DetailsScreen> {
                     const SizedBox(height: 20),
                     const Text(
                       'SINOPSE',
-                      style: TextStyle(
-                        color: Colors.white54,
-                        fontSize: 12,
-                        letterSpacing: 2,
-                      ),
+                      style: TextStyle(color: Colors.white54, fontSize: 12, letterSpacing: 2),
                     ),
                     const SizedBox(height: 8),
                     Text(
                       overview.isEmpty ? 'Sem sinopse disponivel.' : overview,
-                      style: const TextStyle(
-                        color: Colors.white70,
-                        height: 1.5,
-                      ),
+                      style: const TextStyle(color: Colors.white70, height: 1.5),
                     ),
                     const SizedBox(height: 22),
                   ],
@@ -306,8 +292,7 @@ class _DetailsScreenState extends State<DetailsScreen> {
               ),
             ),
             if (widget.item.isTv) SliverToBoxAdapter(child: _seasonsSection()),
-            if (_similar.isNotEmpty)
-              SliverToBoxAdapter(child: _similarSection()),
+            if (_similar.isNotEmpty) SliverToBoxAdapter(child: _similarSection()),
             const SliverToBoxAdapter(child: SizedBox(height: 40)),
           ],
         ),
@@ -330,11 +315,7 @@ class _DetailsScreenState extends State<DetailsScreen> {
         children: <Widget>[
           const Text(
             'TEMPORADAS',
-            style: TextStyle(
-              color: Colors.white54,
-              fontSize: 12,
-              letterSpacing: 2,
-            ),
+            style: TextStyle(color: Colors.white54, fontSize: 12, letterSpacing: 2),
           ),
           const SizedBox(height: 10),
           SizedBox(
@@ -351,6 +332,7 @@ class _DetailsScreenState extends State<DetailsScreen> {
                   onPressed: () => setState(() {
                     _season = n;
                     _episode = 1;
+                    _refreshResume();
                   }),
                 );
               },
@@ -359,11 +341,7 @@ class _DetailsScreenState extends State<DetailsScreen> {
           const SizedBox(height: 14),
           const Text(
             'EPISODIOS',
-            style: TextStyle(
-              color: Colors.white54,
-              fontSize: 12,
-              letterSpacing: 2,
-            ),
+            style: TextStyle(color: Colors.white54, fontSize: 12, letterSpacing: 2),
           ),
           const SizedBox(height: 10),
           _episodesGrid(),
@@ -390,7 +368,10 @@ class _DetailsScreenState extends State<DetailsScreen> {
           label: '$n',
           primary: n == _episode,
           onPressed: () {
-            setState(() => _episode = n);
+            setState(() {
+              _episode = n;
+              _refreshResume();
+            });
             _play();
           },
         );
@@ -408,11 +389,7 @@ class _DetailsScreenState extends State<DetailsScreen> {
             padding: EdgeInsets.symmetric(horizontal: 20),
             child: Text(
               'SEMELHANTES',
-              style: TextStyle(
-                color: Colors.white54,
-                fontSize: 12,
-                letterSpacing: 2,
-              ),
+              style: TextStyle(color: Colors.white54, fontSize: 12, letterSpacing: 2),
             ),
           ),
           const SizedBox(height: 10),
@@ -439,12 +416,11 @@ class _DetailsScreenState extends State<DetailsScreen> {
                       ),
                     ),
                     child: ClipRRect(
-                      borderRadius: BorderRadius.circular(10),
+                      borderRadius: AppTheme.br,
                       child: poster.isEmpty
                           ? Container(color: AppTheme.surface)
                           : CachedNetworkImage(
-                              imageUrl:
-                                  '${AppConfig.tmdbImageBase}/w342$poster',
+                              imageUrl: '${AppConfig.tmdbImageBase}/w342$poster',
                               fit: BoxFit.cover,
                             ),
                     ),
