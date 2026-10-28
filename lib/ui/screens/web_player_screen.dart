@@ -2,12 +2,12 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 
 import '../../core/app_config.dart';
 import '../../core/focus/dpad.dart';
+import '../../core/ui/screen_mode.dart';
 
 /// =============================================================================
 ///  NAVEGADOR INTERNO ("modo web")
@@ -153,20 +153,9 @@ class _WebPlayerScreenState extends State<WebPlayerScreen> {
     super.dispose();
   }
 
-  Future<void> _applyOrientation(bool landscape) async {
-    if (landscape) {
-      await SystemChrome.setPreferredOrientations(<DeviceOrientation>[
-        DeviceOrientation.landscapeLeft,
-        DeviceOrientation.landscapeRight,
-      ]);
-      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-    } else {
-      await SystemChrome.setPreferredOrientations(<DeviceOrientation>[
-        DeviceOrientation.portraitUp,
-      ]);
-      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-    }
-  }
+  // TMC-FIX v1: fila unica (ver ScreenMode).
+  Future<void> _applyOrientation(bool landscape) =>
+      landscape ? ScreenMode.landscape() : ScreenMode.portrait();
 
   Future<void> _inject() async {
     try {

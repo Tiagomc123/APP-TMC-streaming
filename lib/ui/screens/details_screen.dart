@@ -315,7 +315,6 @@ class _DetailsScreenState extends State<DetailsScreen> {
                       const SizedBox(height: 10),
                       EmbeddedTrailer(
                         videoKey: _trailerKey!,
-                        title: widget.item.title,
                         autoPlay: true,
                         onClose: () => setState(() => _trailerOpen = false),
                       ),

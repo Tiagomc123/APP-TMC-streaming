@@ -1,9 +1,9 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
 import '../../core/app_config.dart';
+import '../../core/ui/screen_mode.dart';
 import '../../data/models/media_ref.dart';
 import '../../data/models/resolved_stream.dart';
 import '../../services/progress_service.dart';
@@ -34,6 +34,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   final Set<String> _usedProviders = <String>{};
   late ResolvedStream _stream;
   Duration _lastPosition = Duration.zero;
+  Duration _lastDuration = Duration.zero; // TMC-FIX v1
 
   @override
   void initState() {
@@ -43,12 +44,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
     unawaited(_enterLandscape());
   }
 
-  Future<void> _enterLandscape() async {
-    await SystemChrome.setPreferredOrientations(<DeviceOrientation>[
-      DeviceOrientation.landscapeLeft,
-      DeviceOrientation.landscapeRight,
-    ]);
-  }
+  // TMC-FIX v1: fila unica (ver ScreenMode).
+  Future<void> _enterLandscape() => ScreenMode.landscape();
 
   /// Chamado pelo player quando a fonte morre: pede outra, excluindo as usadas.
   Future<ResolvedStream?> _fallback() async {
@@ -84,11 +81,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   @override
   void dispose() {
-    unawaited(
-      SystemChrome.setPreferredOrientations(<DeviceOrientation>[
-        DeviceOrientation.portraitUp,
-      ]),
-    );
+    // TMC-FIX v1: orientacao + UI mode na mesma fila do trailer/player.
+    unawaited(ScreenMode.portrait());
     super.dispose();
   }
 
@@ -113,6 +107,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         startAt: ProgressService.startAt(widget.ref),
         onProgress: (Duration p, Duration d) {
           _lastPosition = p;
+          _lastDuration = d;
           unawaited(ProgressService.save(widget.ref, p, d));
         },
         onCompleted: () {
@@ -120,9 +115,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
         },
         onNeedFallback: _fallback,
         onExit: () {
-          unawaited(
-            ProgressService.save(widget.ref, _lastPosition, _lastPosition),
-          );
+          // TMC-FIX v1: antes gravava _lastPosition como DURACAO, o que
+          // marcava o titulo como concluido e o removia de "continuar
+          // assistindo". Agora usa a duracao real vista pelo player.
+          final Duration dur = _lastDuration > Duration.zero
+              ? _lastDuration
+              : _lastPosition;
+          unawaited(ProgressService.save(widget.ref, _lastPosition, dur));
         },
       ),
     );

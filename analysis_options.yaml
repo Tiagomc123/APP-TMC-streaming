@@ -10,12 +10,15 @@
 include: package:flutter_lints/flutter.yaml
 
 analyzer:
+  # TMC-FIX v1: removidas exclusoes que nao existem na arvore
+  # (lib/tmc_frame_stub/**, lib/tmc_frame_web/** - os arquivos ficam em
+  #  lib/legacy/, ja coberto pela regra abaixo).
   exclude:
     - lib/legacy/**
     - '**/*.bak_*'
     - .tmc_backup_*/**
     - _tmc_backup_*/**
-    - lib/tmc_frame_stub/**
+    - .tmc_removidos_*/**
     - build/**
     - android/**
     - ios/**

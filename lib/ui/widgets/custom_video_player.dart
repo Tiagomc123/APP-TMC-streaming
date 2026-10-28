@@ -1,12 +1,13 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../../core/focus/dpad.dart';
+import '../../core/log/tmc_log.dart';
+import '../../core/ui/screen_mode.dart';
 import '../../data/models/hls_models.dart';
 import '../../data/models/resolved_stream.dart';
 import 'seek_bar.dart';
@@ -86,6 +87,7 @@ class _CustomVideoPlayerState extends State<CustomVideoPlayer> {
   int _stallSeconds = 0;
   int _retries = 0;
   bool _fallbackTried = false;
+  bool _retryPending = false; // TMC-FIX v1
   late ResolvedStream _stream;
   List<AudioTrack> _audioTracks = const <AudioTrack>[];
   List<SubtitleTrack> _subtitleTracks = const <SubtitleTrack>[];
@@ -103,7 +105,16 @@ class _CustomVideoPlayerState extends State<CustomVideoPlayer> {
         title: 'TMC',
         logLevel: MPVLogLevel.error,
         bufferSize: 64 * 1024 * 1024,
-        protocolWhitelist: <String>['http', 'https', 'tcp', 'tls', 'hls', 'file', 'crypto', 'data'],
+        protocolWhitelist: <String>[
+          'http',
+          'https',
+          'tcp',
+          'tls',
+          'hls',
+          'file',
+          'crypto',
+          'data',
+        ],
       ),
     );
 
@@ -119,9 +130,13 @@ class _CustomVideoPlayerState extends State<CustomVideoPlayer> {
     _applyNetworkTuning();
 
     unawaited(WakelockPlus.enable());
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    unawaited(ScreenMode.immersive());
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      // TMC-FIX v1: se o usuario sair antes do 1o frame, _player e
+      // _rootFocus ja foram descartados -> tocar aqui explodia e o video
+      // "as vezes nao carregava".
+      if (!mounted) return;
       _rootFocus.requestFocus();
       unawaited(_open(_stream, startAt: widget.startAt));
       _restartHideTimer();
@@ -131,6 +146,7 @@ class _CustomVideoPlayerState extends State<CustomVideoPlayer> {
   /// Propriedades do mpv. Chamadas por despacho dinamico porque
   /// `Player.setProperty` existe em algumas versoes do media_kit e nao em outras.
   void _applyNetworkTuning() {
+    // TMC-FIX v1: loga o que falhou em vez de engolir tudo.
     const Map<String, String> props = <String, String>{
       'network-timeout': '25',
       'cache-secs': '30',
@@ -143,7 +159,9 @@ class _CustomVideoPlayerState extends State<CustomVideoPlayer> {
       try {
         // ignore: avoid_dynamic_calls
         (_player as dynamic).setProperty(key, value);
-      } catch (_) {}
+      } catch (err) {
+        TmcLog.w('player', 'mpv nao aceitou $key=$value ($err)');
+      }
     });
   }
 
@@ -154,11 +172,7 @@ class _CustomVideoPlayerState extends State<CustomVideoPlayer> {
       if (!v) _stallSeconds = 0;
     });
 
-    _errorSub = _player.stream.error.listen((String e) {
-      if (!mounted || e.isEmpty) return;
-      setState(() => _error = _humanize(e));
-      _scheduleRetry();
-    });
+    _errorSub = _player.stream.error.listen(_onPlayerError);
 
     _positionSub = _player.stream.position.listen((Duration p) {
       if (!mounted) return;
@@ -187,7 +201,9 @@ class _CustomVideoPlayerState extends State<CustomVideoPlayer> {
     });
 
     _saveTimer = Timer.periodic(const Duration(seconds: 5), (Timer _) {
-      if (_duration > Duration.zero) widget.onProgress?.call(_position, _duration);
+      if (_duration > Duration.zero) {
+        widget.onProgress?.call(_position, _duration);
+      }
     });
 
     _watchdog = Timer.periodic(const Duration(seconds: 3), (Timer _) {
@@ -200,15 +216,34 @@ class _CustomVideoPlayerState extends State<CustomVideoPlayer> {
 
   String _humanize(String raw) {
     final String e = raw.toLowerCase();
-    if (e.contains('403') || e.contains('forbidden')) return 'Acesso negado pela fonte (403)';
-    if (e.contains('404')) return 'Stream nao encontrado (404)';
-    if (e.contains('timeout') || e.contains('timed out')) return 'Tempo de conexao esgotado';
-    if (e.contains('refused')) return 'Conexao recusada';
-    if (e.contains('unrecognized') || e.contains('codec')) return 'Codec nao suportado';
+    if (e.contains('403') || e.contains('forbidden')) {
+      return 'Acesso negado pela fonte (403)';
+    }
+    if (e.contains('404')) {
+      return 'Stream nao encontrado (404)';
+    }
+    if (e.contains('timeout') || e.contains('timed out')) {
+      return 'Tempo de conexao esgotado';
+    }
+    if (e.contains('refused')) {
+      return 'Conexao recusada';
+    }
+    if (e.contains('unrecognized') || e.contains('codec')) {
+      return 'Codec nao suportado';
+    }
     return 'Falha de reproducao';
   }
 
-  Future<void> _open(ResolvedStream s, {Duration startAt = Duration.zero}) async {
+  // TMC-FIX v1: loga o alvo sem imprimir query (token).
+  Future<void> _open(
+    ResolvedStream s, {
+    Duration startAt = Duration.zero,
+  }) async {
+    TmcLog.i(
+      'player',
+      'abrindo ${TmcLog.where(s.url.toString())} '
+          '(fonte=${s.providerId}, inicio=${startAt.inSeconds}s)',
+    );
     try {
       await _player.open(
         Media(
@@ -223,24 +258,59 @@ class _CustomVideoPlayerState extends State<CustomVideoPlayer> {
           _error = null;
           _finished = false;
         });
+        // TMC-FIX v1: abriu com sucesso -> zera o contador de retry.
+        // Antes ele nunca zerava e o 3o erro da sessao trocava de fonte.
+        _retries = 0;
+        TmcLog.i('player', 'aberto com sucesso');
       }
     } catch (e) {
       if (mounted) setState(() => _error = _humanize(e.toString()));
+      TmcLog.e('player', 'falha ao abrir: $e');
       _scheduleRetry();
     }
   }
 
+  // TMC-FIX v1: erro do mpv nem sempre e fatal. Antes QUALQUER erro pintava
+  // a camada preta e transformava o botao PLAY em "reabrir stream".
+  void _onPlayerError(String raw) {
+    if (!mounted || raw.isEmpty) return;
+    final String humano = _humanize(raw);
+    final bool jaVisivel = _error != null;
+    TmcLog.w('player', 'mpv: ${TmcLog.where(raw)} -> $humano');
+
+    final bool provavelFatal =
+        raw.toLowerCase().contains('403') ||
+        raw.toLowerCase().contains('404') ||
+        raw.toLowerCase().contains('refused') ||
+        raw.toLowerCase().contains('unrecognized');
+
+    if (provavelFatal || !jaVisivel) {
+      setState(() => _error = humano);
+    }
+    _scheduleRetry();
+  }
+
   /// Backoff exponencial: 1 s, 2 s, 4 s -> depois troca de fonte.
   void _scheduleRetry() {
+    // TMC-FIX v1: guarda contra rajada de erros do mpv (varios eventos por
+    // segundo). Sem isto o contador estourava e trocava de fonte com o video
+    // funcionando normalmente.
+    if (_retryPending) return;
     _retryTimer?.cancel();
+
     if (_retries >= 3) {
       _retries = 0;
+      _retryPending = false;
+      TmcLog.w('player', '3 tentativas falharam -> pedindo outra fonte');
       unawaited(_tryFallback());
       return;
     }
     _retries++;
+    _retryPending = true;
     final Duration delay = Duration(seconds: 1 << (_retries - 1));
+    TmcLog.i('player', 'retry $_retries em ${delay.inSeconds}s');
     _retryTimer = Timer(delay, () {
+      _retryPending = false;
       if (!mounted || _error == null) return;
       unawaited(_open(_stream, startAt: _position));
     });
@@ -255,7 +325,9 @@ class _CustomVideoPlayerState extends State<CustomVideoPlayer> {
     if (!mounted) return;
 
     if (alt == null) {
-      setState(() => _error = 'Todas as fontes falharam. Toque para tentar novamente.');
+      setState(
+        () => _error = 'Todas as fontes falharam. Toque para tentar novamente.',
+      );
       return;
     }
 
@@ -270,14 +342,18 @@ class _CustomVideoPlayerState extends State<CustomVideoPlayer> {
     if (!_stream.hasQualityOptions) return;
     final HlsVariant lowest = _stream.variants.first;
     _snack('Rede lenta - trocando para ${lowest.label}');
-    unawaited(_open(_stream.copyWith(url: Uri.parse(lowest.url)), startAt: _position));
+    unawaited(
+      _open(_stream.copyWith(url: Uri.parse(lowest.url)), startAt: _position),
+    );
   }
 
   void _snack(String msg) {
     if (!mounted) return;
     ScaffoldMessenger.of(context)
       ..clearSnackBars()
-      ..showSnackBar(SnackBar(content: Text(msg), duration: const Duration(seconds: 2)));
+      ..showSnackBar(
+        SnackBar(content: Text(msg), duration: const Duration(seconds: 2)),
+      );
   }
 
   // --------------------------------- controles -------------------------------
@@ -348,7 +424,7 @@ class _CustomVideoPlayerState extends State<CustomVideoPlayer> {
     _tracksSub?.cancel();
 
     unawaited(WakelockPlus.disable());
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    unawaited(ScreenMode.edgeToEdge());
     unawaited(_player.dispose());
 
     _rootFocus.dispose();
@@ -373,26 +449,34 @@ class _CustomVideoPlayerState extends State<CustomVideoPlayer> {
         shortcuts: kPlayerShortcuts,
         child: Actions(
           actions: <Type, Action<Intent>>{
-            TogglePlayIntent: CallbackAction<TogglePlayIntent>(onInvoke: (_) {
-              _togglePlay();
-              return null;
-            }),
-            SeekIntent: CallbackAction<SeekIntent>(onInvoke: (SeekIntent i) {
-              _seekBy(i.delta);
-              return null;
-            }),
-            ShowOverlayIntent: CallbackAction<ShowOverlayIntent>(onInvoke: (_) {
-              if (_uiVisible) {
-                _hideUi();
-              } else {
-                _showUi();
-              }
-              return null;
-            }),
-            ExitPlayerIntent: CallbackAction<ExitPlayerIntent>(onInvoke: (_) {
-              unawaited(_exit());
-              return null;
-            }),
+            TogglePlayIntent: CallbackAction<TogglePlayIntent>(
+              onInvoke: (_) {
+                _togglePlay();
+                return null;
+              },
+            ),
+            SeekIntent: CallbackAction<SeekIntent>(
+              onInvoke: (SeekIntent i) {
+                _seekBy(i.delta);
+                return null;
+              },
+            ),
+            ShowOverlayIntent: CallbackAction<ShowOverlayIntent>(
+              onInvoke: (_) {
+                if (_uiVisible) {
+                  _hideUi();
+                } else {
+                  _showUi();
+                }
+                return null;
+              },
+            ),
+            ExitPlayerIntent: CallbackAction<ExitPlayerIntent>(
+              onInvoke: (_) {
+                unawaited(_exit());
+                return null;
+              },
+            ),
           },
           child: Focus(
             focusNode: _rootFocus,
@@ -439,8 +523,12 @@ class _CustomVideoPlayerState extends State<CustomVideoPlayer> {
   }
 
   Widget _bufferingIndicator() => const Center(
-        child: SizedBox(width: 52, height: 52, child: CircularProgressIndicator(strokeWidth: 3)),
-      );
+    child: SizedBox(
+      width: 52,
+      height: 52,
+      child: CircularProgressIndicator(strokeWidth: 3),
+    ),
+  );
 
   Widget _errorLayer() {
     return Container(
@@ -451,10 +539,15 @@ class _CustomVideoPlayerState extends State<CustomVideoPlayer> {
           children: <Widget>[
             const Icon(Icons.wifi_off_rounded, color: Colors.white54, size: 56),
             const SizedBox(height: 16),
-            Text(_error!, style: const TextStyle(color: Colors.white, fontSize: 17)),
+            Text(
+              _error!,
+              style: const TextStyle(color: Colors.white, fontSize: 17),
+            ),
             const SizedBox(height: 6),
-            Text('Fonte: ${_stream.providerLabel}',
-                style: const TextStyle(color: Colors.white38, fontSize: 12)),
+            Text(
+              'Fonte: ${_stream.providerLabel}',
+              style: const TextStyle(color: Colors.white38, fontSize: 12),
+            ),
             const SizedBox(height: 22),
             Wrap(
               alignment: WrapAlignment.center,
@@ -480,7 +573,11 @@ class _CustomVideoPlayerState extends State<CustomVideoPlayer> {
                       unawaited(_tryFallback());
                     },
                   ),
-                TvButton(label: 'SAIR', icon: Icons.close, onPressed: () => unawaited(_exit())),
+                TvButton(
+                  label: 'SAIR',
+                  icon: Icons.close,
+                  onPressed: () => unawaited(_exit()),
+                ),
               ],
             ),
           ],
@@ -496,8 +593,14 @@ class _CustomVideoPlayerState extends State<CustomVideoPlayer> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[
-            const Text('FIM',
-                style: TextStyle(color: Colors.white, fontSize: 30, letterSpacing: 8)),
+            const Text(
+              'FIM',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 30,
+                letterSpacing: 8,
+              ),
+            ),
             const SizedBox(height: 20),
             Row(
               mainAxisSize: MainAxisSize.min,
@@ -513,7 +616,11 @@ class _CustomVideoPlayerState extends State<CustomVideoPlayer> {
                   },
                 ),
                 const SizedBox(width: 12),
-                TvButton(label: 'VOLTAR', icon: Icons.arrow_back, onPressed: () => unawaited(_exit())),
+                TvButton(
+                  label: 'VOLTAR',
+                  icon: Icons.arrow_back,
+                  onPressed: () => unawaited(_exit()),
+                ),
               ],
             ),
           ],
@@ -533,7 +640,11 @@ class _CustomVideoPlayerState extends State<CustomVideoPlayer> {
             gradient: LinearGradient(
               begin: Alignment.topCenter,
               end: Alignment.bottomCenter,
-              colors: <Color>[Colors.black87, Colors.transparent, Colors.black87],
+              colors: <Color>[
+                Colors.black87,
+                Colors.transparent,
+                Colors.black87,
+              ],
               stops: <double>[0, 0.45, 1],
             ),
           ),
@@ -565,7 +676,11 @@ class _CustomVideoPlayerState extends State<CustomVideoPlayer> {
         padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
         child: Row(
           children: <Widget>[
-            TvButton(label: 'VOLTAR', icon: Icons.arrow_back, onPressed: () => unawaited(_exit())),
+            TvButton(
+              label: 'VOLTAR',
+              icon: Icons.arrow_back,
+              onPressed: () => unawaited(_exit()),
+            ),
             const SizedBox(width: 16),
             Expanded(
               child: Column(
@@ -577,21 +692,29 @@ class _CustomVideoPlayerState extends State<CustomVideoPlayer> {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
-                        color: Colors.white, fontWeight: FontWeight.w800, fontSize: 16),
+                      color: Colors.white,
+                      fontWeight: FontWeight.w800,
+                      fontSize: 16,
+                    ),
                   ),
                   if (widget.subtitle != null)
                     Text(
                       widget.subtitle!,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(color: Colors.white54, fontSize: 12),
+                      style: const TextStyle(
+                        color: Colors.white54,
+                        fontSize: 12,
+                      ),
                     ),
                 ],
               ),
             ),
             if (_stream.hasQualityOptions)
               TvButton(
-                label: _stream.qualityLabel.isEmpty ? 'QUALIDADE' : _stream.qualityLabel,
+                label: _stream.qualityLabel.isEmpty
+                    ? 'QUALIDADE'
+                    : _stream.qualityLabel,
                 icon: Icons.high_quality,
                 onPressed: _qualitySheet,
               ),
@@ -648,8 +771,16 @@ class _CustomVideoPlayerState extends State<CustomVideoPlayer> {
                   icon: Icons.speed,
                   onPressed: _speedSheet,
                 ),
-                TvButton(label: 'AUDIO', icon: Icons.audiotrack, onPressed: _audioSheet),
-                TvButton(label: 'LEGENDA', icon: Icons.subtitles, onPressed: _subtitleSheet),
+                TvButton(
+                  label: 'AUDIO',
+                  icon: Icons.audiotrack,
+                  onPressed: _audioSheet,
+                ),
+                TvButton(
+                  label: 'LEGENDA',
+                  icon: Icons.subtitles,
+                  onPressed: _subtitleSheet,
+                ),
               ],
             ),
           ],
@@ -676,7 +807,10 @@ class _CustomVideoPlayerState extends State<CustomVideoPlayer> {
                 Text(
                   title,
                   style: const TextStyle(
-                      color: Colors.white, fontSize: 17, fontWeight: FontWeight.w800),
+                    color: Colors.white,
+                    fontSize: 17,
+                    fontWeight: FontWeight.w800,
+                  ),
                 ),
                 const SizedBox(height: 14),
                 ...children,
@@ -689,88 +823,101 @@ class _CustomVideoPlayerState extends State<CustomVideoPlayer> {
   }
 
   void _qualitySheet() {
-    unawaited(_sheet('QUALIDADE', <Widget>[
-      for (final HlsVariant v in _stream.variants.reversed)
-        Padding(
-          padding: const EdgeInsets.only(bottom: 8),
-          child: TvButton(
-            label: v.label,
-            primary: _stream.url.toString() == v.url,
-            onPressed: () {
-              Navigator.of(context).pop();
-              final Duration at = _position;
-              setState(() => _stream = _stream.copyWith(url: Uri.parse(v.url), qualityLabel: v.label));
-              unawaited(_open(_stream, startAt: at));
-            },
+    unawaited(
+      _sheet('QUALIDADE', <Widget>[
+        for (final HlsVariant v in _stream.variants.reversed)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: TvButton(
+              label: v.label,
+              primary: _stream.url.toString() == v.url,
+              onPressed: () {
+                Navigator.of(context).pop();
+                final Duration at = _position;
+                setState(
+                  () => _stream = _stream.copyWith(
+                    url: Uri.parse(v.url),
+                    qualityLabel: v.label,
+                  ),
+                );
+                unawaited(_open(_stream, startAt: at));
+              },
+            ),
           ),
-        ),
-    ]));
+      ]),
+    );
   }
 
   void _speedSheet() {
-    unawaited(_sheet('VELOCIDADE', <Widget>[
-      Wrap(
-        spacing: 8,
-        runSpacing: 8,
-        children: <Widget>[
-          for (int i = 0; i < _speeds.length; i++)
-            TvButton(
-              label: '${_speeds[i]}x',
-              primary: i == _speedIndex,
-              onPressed: () {
-                unawaited(_player.setRate(_speeds[i]));
-                setState(() => _speedIndex = i);
-                Navigator.of(context).pop();
-              },
-            ),
-        ],
-      ),
-    ]));
+    unawaited(
+      _sheet('VELOCIDADE', <Widget>[
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: <Widget>[
+            for (int i = 0; i < _speeds.length; i++)
+              TvButton(
+                label: '${_speeds[i]}x',
+                primary: i == _speedIndex,
+                onPressed: () {
+                  unawaited(_player.setRate(_speeds[i]));
+                  setState(() => _speedIndex = i);
+                  Navigator.of(context).pop();
+                },
+              ),
+          ],
+        ),
+      ]),
+    );
   }
 
   void _audioSheet() {
-    unawaited(_sheet('FAIXA DE AUDIO', <Widget>[
-      TvButton(
-        label: 'Automatico',
-        onPressed: () {
-          unawaited(_player.setAudioTrack(AudioTrack.auto()));
-          Navigator.of(context).pop();
-        },
-      ),
-      for (final AudioTrack t in _audioTracks)
-        Padding(
-          padding: const EdgeInsets.only(top: 8),
-          child: TvButton(
-            label: t.title ?? t.language ?? t.id,
-            onPressed: () {
-              unawaited(_player.setAudioTrack(t));
-              Navigator.of(context).pop();
-            },
-          ),
+    unawaited(
+      _sheet('FAIXA DE AUDIO', <Widget>[
+        TvButton(
+          label: 'Automatico',
+          onPressed: () {
+            unawaited(_player.setAudioTrack(AudioTrack.auto()));
+            Navigator.of(context).pop();
+          },
         ),
-    ]));
+        for (final AudioTrack t in _audioTracks)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: TvButton(
+              label: t.title ?? t.language ?? t.id,
+              onPressed: () {
+                unawaited(_player.setAudioTrack(t));
+                Navigator.of(context).pop();
+              },
+            ),
+          ),
+      ]),
+    );
   }
 
   void _subtitleSheet() {
-    unawaited(_sheet('LEGENDA', <Widget>[
-      TvButton(
-        label: 'Desligada',
-        onPressed: () {
-          unawaited(_player.setSubtitleTrack(SubtitleTrack.no()));
-          Navigator.of(context).pop();
-        },
-      ),
-      for (final SubtitleTrack t in _subtitleTracks)
-        Padding(
-          padding: const EdgeInsets.only(top: 8),
-          child: TvButton(
-            label: t.title ?? t.language ?? t.id,
-            onPressed: () {
-              unawaited(_player.setSubtitleTrack(t));
-              Navigator.of(context).pop();
-            },
-          ),
+    unawaited(
+      _sheet('LEGENDA', <Widget>[
+        TvButton(
+          label: 'Desligada',
+          onPressed: () {
+            unawaited(_player.setSubtitleTrack(SubtitleTrack.no()));
+            Navigator.of(context).pop();
+          },
         ),
-    ]));
+        for (final SubtitleTrack t in _subtitleTracks)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: TvButton(
+              label: t.title ?? t.language ?? t.id,
+              onPressed: () {
+                unawaited(_player.setSubtitleTrack(t));
+                Navigator.of(context).pop();
+              },
+            ),
+          ),
+      ]),
+    );
   }
 }
