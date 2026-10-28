@@ -12,6 +12,24 @@ import '../../data/models/hls_models.dart';
 import '../../data/models/resolved_stream.dart';
 import 'seek_bar.dart';
 
+class PlayerBackGuard extends StatelessWidget {
+  const PlayerBackGuard({super.key, required this.onBack, required this.child});
+
+  final VoidCallback onBack;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (bool didPop, Object? _) {
+        if (!didPop) onBack();
+      },
+      child: child,
+    );
+  }
+}
+
 /// =============================================================================
 ///  PLAYER NATIVO INTEGRADO
 ///
@@ -88,6 +106,7 @@ class _CustomVideoPlayerState extends State<CustomVideoPlayer> {
   int _retries = 0;
   bool _fallbackTried = false;
   bool _retryPending = false; // TMC-FIX v1
+  bool _exitRequested = false;
   late ResolvedStream _stream;
   List<AudioTrack> _audioTracks = const <AudioTrack>[];
   List<SubtitleTrack> _subtitleTracks = const <SubtitleTrack>[];
@@ -176,6 +195,11 @@ class _CustomVideoPlayerState extends State<CustomVideoPlayer> {
 
     _positionSub = _player.stream.position.listen((Duration p) {
       if (!mounted) return;
+      if (p > _position) {
+        // Consider the stream healthy only after playback actually advances.
+        _retries = 0;
+        _fallbackTried = false;
+      }
       setState(() {
         _position = p;
         _playing = _player.state.playing;
@@ -208,7 +232,11 @@ class _CustomVideoPlayerState extends State<CustomVideoPlayer> {
 
     _watchdog = Timer.periodic(const Duration(seconds: 3), (Timer _) {
       if (!mounted || _finished) return;
-      if (_position == _lastPosition && !_playing) _stallSeconds += 3;
+      if (_buffering && _position == _lastPosition) {
+        _stallSeconds += 3;
+      } else {
+        _stallSeconds = 0;
+      }
       _lastPosition = _position;
       if (_stallSeconds >= 12 && _buffering) _onStall();
     });
@@ -258,9 +286,6 @@ class _CustomVideoPlayerState extends State<CustomVideoPlayer> {
           _error = null;
           _finished = false;
         });
-        // TMC-FIX v1: abriu com sucesso -> zera o contador de retry.
-        // Antes ele nunca zerava e o 3o erro da sessao trocava de fonte.
-        _retries = 0;
         TmcLog.i('player', 'aberto com sucesso');
       }
     } catch (e) {
@@ -339,12 +364,31 @@ class _CustomVideoPlayerState extends State<CustomVideoPlayer> {
 
   void _onStall() {
     _stallSeconds = 0;
-    if (!_stream.hasQualityOptions) return;
-    final HlsVariant lowest = _stream.variants.first;
-    _snack('Rede lenta - trocando para ${lowest.label}');
-    unawaited(
-      _open(_stream.copyWith(url: Uri.parse(lowest.url)), startAt: _position),
-    );
+    if (_stream.hasQualityOptions && _stream.variants.length > 1) {
+      final HlsVariant lowest = _stream.variants.first;
+      if (_stream.url.toString() != lowest.url) {
+        _snack('Rede lenta - trocando para ${lowest.label}');
+        unawaited(
+          _open(
+            _stream.copyWith(url: Uri.parse(lowest.url)),
+            startAt: _position,
+          ),
+        );
+        return;
+      }
+    }
+
+    if (widget.onNeedFallback == null) {
+      setState(
+        () => _error =
+            'A fonte demorou para iniciar. Toque em TENTAR DE NOVO ou SAIR.',
+      );
+      return;
+    }
+
+    setState(() => _error = 'A fonte travou. Procurando outra fonte...');
+    _retries = 3;
+    _scheduleRetry();
   }
 
   void _snack(String msg) {
@@ -402,12 +446,15 @@ class _CustomVideoPlayerState extends State<CustomVideoPlayer> {
     });
   }
 
-  Future<void> _exit() async {
+  void _exit() {
+    if (_exitRequested) return;
+    _exitRequested = true;
     widget.onProgress?.call(_position, _duration);
-    await _player.pause();
-    if (!mounted) return;
     widget.onExit?.call();
-    Navigator.of(context).maybePop();
+    if (!mounted) return;
+    // This screen blocks system back with PopScope. maybePop() respects that
+    // veto and only hides the controls; an explicit exit must pop the route.
+    Navigator.of(context).pop();
   }
 
   @override
@@ -435,16 +482,8 @@ class _CustomVideoPlayerState extends State<CustomVideoPlayer> {
   // ---------------------------------- build ----------------------------------
   @override
   Widget build(BuildContext context) {
-    return PopScope(
-      canPop: false,
-      onPopInvokedWithResult: (bool didPop, Object? _) {
-        if (didPop) return;
-        if (_uiVisible) {
-          _hideUi();
-        } else {
-          unawaited(_exit());
-        }
-      },
+    return PlayerBackGuard(
+      onBack: _exit,
       child: Shortcuts(
         shortcuts: kPlayerShortcuts,
         child: Actions(
@@ -473,7 +512,7 @@ class _CustomVideoPlayerState extends State<CustomVideoPlayer> {
             ),
             ExitPlayerIntent: CallbackAction<ExitPlayerIntent>(
               onInvoke: (_) {
-                unawaited(_exit());
+                _exit();
                 return null;
               },
             ),
@@ -573,11 +612,7 @@ class _CustomVideoPlayerState extends State<CustomVideoPlayer> {
                       unawaited(_tryFallback());
                     },
                   ),
-                TvButton(
-                  label: 'SAIR',
-                  icon: Icons.close,
-                  onPressed: () => unawaited(_exit()),
-                ),
+                TvButton(label: 'SAIR', icon: Icons.close, onPressed: _exit),
               ],
             ),
           ],
@@ -619,7 +654,7 @@ class _CustomVideoPlayerState extends State<CustomVideoPlayer> {
                 TvButton(
                   label: 'VOLTAR',
                   icon: Icons.arrow_back,
-                  onPressed: () => unawaited(_exit()),
+                  onPressed: _exit,
                 ),
               ],
             ),
@@ -676,11 +711,7 @@ class _CustomVideoPlayerState extends State<CustomVideoPlayer> {
         padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
         child: Row(
           children: <Widget>[
-            TvButton(
-              label: 'VOLTAR',
-              icon: Icons.arrow_back,
-              onPressed: () => unawaited(_exit()),
-            ),
+            TvButton(label: 'VOLTAR', icon: Icons.arrow_back, onPressed: _exit),
             const SizedBox(width: 16),
             Expanded(
               child: Column(
