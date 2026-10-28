@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:youtube_player_iframe/youtube_player_iframe.dart';
 
 import '../../core/focus/dpad.dart';
-import '../../core/log/tmc_log.dart';
 import '../../core/ui/screen_mode.dart';
 
 /// =============================================================================
@@ -13,9 +12,8 @@ import '../../core/ui/screen_mode.dart';
 ///  100% dentro da pagina de detalhes. Sem url_launcher, sem abrir o app do
 ///  YouTube, sem WebView "nudge".
 ///
-///  O botao "GIRAR TELA" forca o app para paisagem por meio de
-///  `SystemChrome.setPreferredOrientations`, ignorando a rotacao automatica
-///  do aparelho, e devolve o retrato quando o trailer e fechado.
+///  O botao "TELA CHEIA" abre o trailer em paisagem e mostra uma saida
+///  persistente para voltar aos detalhes.
 ///
 ///  A leitura do player e feita de forma TOLERANTE A VERSAO do pacote:
 ///   - `autoPlay` e `startSeconds` vao no factory (nao em YoutubePlayerParams);
@@ -42,7 +40,6 @@ class _EmbeddedTrailerState extends State<EmbeddedTrailer> {
   YoutubePlayerController? _ctl;
   bool _playing = false;
   bool _muted = false;
-  bool _rotated = false;
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
   // TMC-FIX v1
@@ -68,17 +65,6 @@ class _EmbeddedTrailerState extends State<EmbeddedTrailer> {
       ),
     );
     _subscription = _ctl!.stream.listen(_onValue);
-  }
-
-  // TMC-FIX v1: re-sincroniza o estado do botao com a orientacao real.
-  // O trailer nao e descartado quando o usuario abre o player, entao
-  // _rotated ficava obsoleto depois de voltar do PlayerScreen.
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    final bool paisagem =
-        MediaQuery.of(context).orientation == Orientation.landscape;
-    if (paisagem != _rotated) _rotated = paisagem;
   }
 
   /// Le o estado do player sem depender do nome exato dos campos.
@@ -137,34 +123,7 @@ class _EmbeddedTrailerState extends State<EmbeddedTrailer> {
   void dispose() {
     _subscription?.cancel();
     _ctl?.close();
-    // TMC-FIX v1: restaura retrato + UI mode numa unica chamada serializada.
-    if (_rotated) {
-      unawaited(ScreenMode.portrait());
-      TmcLog.i('trailer', 'dispose -> retrato restaurado');
-    }
     super.dispose();
-  }
-
-  // ------------------------------ rotacao de tela ----------------------------
-  // TMC-FIX v1: tudo passa pela fila do ScreenMode para nao competir com o
-  // player, com a tela cheia do trailer nem com o PlayerScreen.
-  Future<void> _forceLandscape() => ScreenMode.landscape();
-
-  Future<void> _forcePortrait() => ScreenMode.portrait();
-
-  Future<void> _toggleRotation() async {
-    final bool next = !_rotated;
-    if (mounted) setState(() => _rotated = next);
-    try {
-      if (next) {
-        await _forceLandscape();
-      } else {
-        await _forcePortrait();
-      }
-    } catch (err) {
-      TmcLog.w('trailer', 'falha ao trocar orientacao: $err');
-    }
-    TmcLog.i('trailer', 'orientacao -> ${next ? 'paisagem' : 'retrato'}');
   }
 
   void _toggle() {
@@ -185,6 +144,23 @@ class _EmbeddedTrailerState extends State<EmbeddedTrailer> {
       _ctl?.unMute();
     }
     setState(() => _muted = next);
+  }
+
+  Future<void> _expand() async {
+    final bool resumePlayback = _playing;
+    _ctl?.pauseVideo();
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => _FullscreenTrailer(
+          videoKey: widget.videoKey,
+          startAt: _position,
+          muted: _muted,
+          returnToLandscape:
+              MediaQuery.orientationOf(context) == Orientation.landscape,
+        ),
+      ),
+    );
+    if (mounted && resumePlayback) _ctl?.playVideo();
   }
 
   String _fmt(Duration d) =>
@@ -209,11 +185,10 @@ class _EmbeddedTrailerState extends State<EmbeddedTrailer> {
         TrailerControls(
           playing: _playing,
           muted: _muted,
-          rotated: _rotated,
           positionLabel: '${_fmt(_position)} / ${_fmt(_duration)}',
           onTogglePlayback: _toggle,
-          onToggleRotation: () => unawaited(_toggleRotation()),
           onToggleMute: _toggleMute,
+          onFullscreen: () => unawaited(_expand()),
           onClose: widget.onClose,
         ),
       ],
@@ -228,21 +203,19 @@ class TrailerControls extends StatelessWidget {
     super.key,
     required this.playing,
     required this.muted,
-    required this.rotated,
     required this.positionLabel,
     required this.onTogglePlayback,
-    required this.onToggleRotation,
     required this.onToggleMute,
+    required this.onFullscreen,
     this.onClose,
   });
 
   final bool playing;
   final bool muted;
-  final bool rotated;
   final String positionLabel;
   final VoidCallback onTogglePlayback;
-  final VoidCallback onToggleRotation;
   final VoidCallback onToggleMute;
+  final VoidCallback onFullscreen;
   final VoidCallback? onClose;
 
   @override
@@ -259,14 +232,14 @@ class TrailerControls extends StatelessWidget {
           onPressed: onTogglePlayback,
         ),
         TvButton(
-          label: 'GIRAR TELA',
-          icon: rotated ? Icons.stay_current_portrait : Icons.screen_rotation,
-          onPressed: onToggleRotation,
-        ),
-        TvButton(
           label: muted ? 'SOM ON' : 'MUDO',
           icon: muted ? Icons.volume_up : Icons.volume_off,
           onPressed: onToggleMute,
+        ),
+        TvButton(
+          label: 'TELA CHEIA',
+          icon: Icons.fullscreen,
+          onPressed: onFullscreen,
         ),
         if (onClose != null)
           TvButton(label: 'FECHAR', icon: Icons.close, onPressed: onClose!),
@@ -278,6 +251,133 @@ class TrailerControls extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Tela cheia com saida sempre visivel sobre o player.
+class TrailerFullscreenScaffold extends StatelessWidget {
+  const TrailerFullscreenScaffold({
+    super.key,
+    required this.title,
+    required this.player,
+  });
+
+  final String title;
+  final Widget player;
+
+  @override
+  Widget build(BuildContext context) {
+    return PopScope(
+      canPop: true,
+      child: Scaffold(
+        backgroundColor: Colors.black,
+        body: Stack(
+          fit: StackFit.expand,
+          children: <Widget>[
+            Center(child: player),
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: SafeArea(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 8,
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: <Widget>[
+                      Flexible(
+                        child: Text(
+                          title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      FilledButton.icon(
+                        onPressed: () => Navigator.of(context).maybePop(),
+                        icon: const Icon(Icons.close),
+                        label: const Text('FECHAR'),
+                        style: FilledButton.styleFrom(
+                          backgroundColor: Colors.red.shade700,
+                          foregroundColor: Colors.white,
+                          minimumSize: const Size(120, 48),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _FullscreenTrailer extends StatefulWidget {
+  const _FullscreenTrailer({
+    required this.videoKey,
+    required this.startAt,
+    required this.muted,
+    required this.returnToLandscape,
+  });
+
+  final String videoKey;
+  final Duration startAt;
+  final bool muted;
+  final bool returnToLandscape;
+
+  @override
+  State<_FullscreenTrailer> createState() => _FullscreenTrailerState();
+}
+
+class _FullscreenTrailerState extends State<_FullscreenTrailer> {
+  late final YoutubePlayerController _ctl;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctl = YoutubePlayerController.fromVideoId(
+      videoId: widget.videoKey,
+      autoPlay: true,
+      startSeconds: widget.startAt.inSeconds.toDouble(),
+      params: YoutubePlayerParams(
+        mute: widget.muted,
+        showControls: true,
+        showFullscreenButton: false,
+        strictRelatedVideos: true,
+        privacyEnhancedMode: true,
+      ),
+    );
+    unawaited(ScreenMode.landscape());
+  }
+
+  @override
+  void dispose() {
+    _ctl.close();
+    unawaited(
+      widget.returnToLandscape ? ScreenMode.landscape() : ScreenMode.portrait(),
+    );
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return TrailerFullscreenScaffold(
+      title: 'Trailer',
+      player: YoutubePlayerControllerProvider(
+        controller: _ctl,
+        child: YoutubePlayer(controller: _ctl, aspectRatio: 16 / 9),
+      ),
     );
   }
 }
